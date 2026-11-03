@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Fenêtre principale : événements et glisser-déposer. Aucun accès direct aux fichiers, au réseau ni au shell depuis la page.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

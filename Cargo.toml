@@ -1,0 +1,52 @@
+[package]
+name = "verbatim"
+version = "4.1.0"
+description = "Transcription audio avec séparation des locuteurs"
+edition = "2021"
+rust-version = "1.91"
+
+[lib]
+name = "verbatim_lib"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "Verbatim"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["custom-protocol", "protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "multipart", "stream"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6"
+base64 = "0.22"
+symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4", "mp3", "alac", "flac", "wav", "pcm", "vorbis", "ogg", "mkv", "adpcm"] }
+rubato = "0.16"
+flacenc = { version = "0.5", default-features = false }
+crossbeam-channel = "0.5"
+sha2 = "0.10"
+rrule = "0.14"
+chrono-tz = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Power", "Win32_System_Performance", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_Security"] }
+windows-core = "0.62"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
