@@ -1,6 +1,6 @@
 {
- "version": "4.2.0",
- "sha256": "face1a9f8d5b6cb56b17d280c36f2b15e4be52f2885da1324f92fc4ee7b741fb",
- "size": 10073600,
- "notes": "Accueil avec l’agenda du jour, thème clair ou sombre, coût réel et solde affichés après chaque transcription, crédits insuffisants gérés sans perte, journal plus utile, boîte à idées, correction du renommage pendant la finalisation."
+ "version": "4.3.0",
+ "sha256": "61792638c7c169636ddec56cadd4f953e35aed1e2d0fcef1f8dce9ccd0260e2e",
+ "size": 10137600,
+ "notes": "Accès rapides (bouton ⋯) : thème, signaler un problème avec capture de la fenêtre, proposer une idée. Bulles d’explication toujours lisibles, sélecteur de thème corrigé."
 }
