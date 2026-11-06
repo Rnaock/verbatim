@@ -1,6 +1,6 @@
 {
- "version": "4.1.0",
- "sha256": "64720011bc5e8cf4dd25d4658e08e928ed427cca2fb21ceb6bfe1b55f5e7555c",
- "size": 10041856,
- "notes": "Agenda Google (rendez-vous en cours, participants, Rejoindre et enregistrer), mises à jour automatiques, mode automatique à coût ×1, titre modifiable pendant la finalisation, explications au survol."
+ "version": "4.2.0",
+ "sha256": "face1a9f8d5b6cb56b17d280c36f2b15e4be52f2885da1324f92fc4ee7b741fb",
+ "size": 10073600,
+ "notes": "Accueil avec l’agenda du jour, thème clair ou sombre, coût réel et solde affichés après chaque transcription, crédits insuffisants gérés sans perte, journal plus utile, boîte à idées, correction du renommage pendant la finalisation."
 }
