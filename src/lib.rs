@@ -14,6 +14,8 @@ pub mod pipeline;
 pub mod recorder;
 pub mod transcript;
 pub mod update;
+#[cfg(windows)]
+mod wincap;
 pub mod vault;
 
 use crate::core::{ApiError, KeyState, KeyStore, Options, Paths, Res, Settings};
@@ -799,6 +801,113 @@ fn ensure_idle(st: &App) -> Res<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Signaler un problème : capture de la fenêtre + contexte technique
+// ---------------------------------------------------------------------------
+#[derive(Serialize)]
+struct Capture {
+    /// Aperçu (data URL PNG).
+    preview: String,
+    path: String,
+    clipboard: bool,
+}
+
+#[tauri::command]
+fn bug_capture(app: AppHandle, st: St<'_>) -> Res<Capture> {
+    #[cfg(windows)]
+    {
+        let w = app.get_webview_window("main").ok_or(ApiError::new(500, "fenêtre introuvable"))?;
+        let hwnd = w.hwnd().map_err(|e| ApiError::new(500, e.to_string()))?;
+        let shot = wincap::capture(windows::Win32::Foundation::HWND(hwnd.0 as _)).map_err(|e| ApiError::new(500, e))?;
+        let png = wincap::png(&shot).map_err(|e| ApiError::new(500, e))?;
+        let dir = st.paths.data_dir.join("captures");
+        std::fs::create_dir_all(&dir)?;
+        // On garde les 10 dernières captures.
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut old: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+            old.sort();
+            for p in old.iter().rev().skip(9) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        let path = dir.join(format!("capture-{}.png", chrono::Local::now().format("%Y-%m-%d-%Hh%Mm%Ss")));
+        std::fs::write(&path, &png)?;
+        let clipboard = wincap::to_clipboard(&shot, &png).is_ok();
+        trace(&format!("capture pour signalement ({}×{}, presse-papiers {clipboard})", shot.width, shot.height));
+        use base64::Engine;
+        Ok(Capture { preview: format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png)), path: path.to_string_lossy().into_owned(), clipboard })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (&app, &st);
+        Err(ApiError::new(501, "capture d'écran disponible seulement sous Windows"))
+    }
+}
+
+#[tauri::command]
+fn reveal_file(app: AppHandle, st: St<'_>, path: String) -> Res<()> {
+    // Seulement les captures de Verbatim.
+    let p = PathBuf::from(&path);
+    if !p.starts_with(st.paths.data_dir.join("captures")) {
+        return Err(ApiError::new(403, "fichier refusé"));
+    }
+    app.opener().reveal_item_in_dir(&p).map_err(|e| ApiError::new(500, e.to_string()))
+}
+
+/// Retire d'une ligne du journal ce qui pourrait identifier une conversation :
+/// dossier personnel, et nom des dossiers de la bibliothèque (date gardée).
+fn sanitize_line(line: &str, library: &str, home: &str) -> String {
+    let mut out = line.to_string();
+    if !library.is_empty() {
+        let mut res = String::new();
+        let mut rest = out.as_str();
+        while let Some(i) = rest.find(library) {
+            res.push_str(&rest[..i]);
+            res.push_str("<bibliothèque>");
+            rest = &rest[i + library.len()..];
+            if let Some(r) = rest.strip_prefix(['\\', '/']) {
+                let end = r.find(['\\', '/']).unwrap_or(r.len());
+                let folder: String = r[..end].chars().take(16).collect();
+                res.push_str(&format!("\\{folder}…"));
+                rest = &r[end..];
+            }
+        }
+        res.push_str(rest);
+        out = res;
+    }
+    if !home.is_empty() {
+        out = out.replace(home, "%USERPROFILE%");
+    }
+    out
+}
+
+/// Contexte technique joint à un signalement : version, réglages utiles, fin
+/// du journal. Montré en entier à l'utilisateur avant publication.
+#[tauri::command]
+fn bug_context(st: St<'_>) -> String {
+    let s = st.settings();
+    let lib = st.lib().root.to_string_lossy().into_owned();
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+    let journal = std::fs::read_to_string(st.paths.data_dir.join("journal.txt")).unwrap_or_default();
+    let tail: Vec<String> = journal.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().map(|l| sanitize_line(l, &lib, &home)).collect();
+    let mut text = format!(
+        "Verbatim {} · {} · sources micro={} pc={} · mode {} · thème {}\n\nJournal (40 dernières lignes) :\n```\n{}\n```",
+        core::VERSION,
+        std::env::consts::OS,
+        s.rec_mic,
+        s.rec_pc,
+        s.mode,
+        s.theme,
+        tail.join("\n")
+    );
+    if text.len() > 5500 {
+        let cut = text.char_indices().map(|(i, _)| i).take_while(|&i| i < 5400).last().unwrap_or(0);
+        text.truncate(cut);
+        text.push_str("\n…\n```");
+    }
+    text
+}
+
 /// Erreurs de l'interface, pour le journal (texte tronqué, jamais de contenu).
 #[tauri::command]
 fn log_ui(message: String) {
@@ -1280,6 +1389,17 @@ fn measure_cost(estimated: f64, billed_seconds: f64, rate: f64, before: Option<&
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+
+    #[test]
+    fn journal_partage_sans_titres() {
+        let lib = r"C:\Users\Manuel\Documents\Verbatim";
+        let home = r"C:\Users\Manuel";
+        let l = r"[..] finalisation 2026-11-03 14h00 : ÉCHEC accès refusé C:\Users\Manuel\Documents\Verbatim\2026-11-03 14h00 Point avec Jean\micro.wav";
+        let out = sanitize_line(l, lib, home);
+        assert!(!out.contains("Jean") && !out.contains("Manuel"), "{out}");
+        assert!(out.contains(r"<bibliothèque>\2026-11-03 14h00…\micro.wav"), "{out}");
+        assert_eq!(sanitize_line(r"journal C:\Users\Manuel\AppData", lib, home), r"journal %USERPROFILE%\AppData");
+    }
     fn bal(count: f64, limit: f64) -> core::Balance {
         core::Balance { count: Some(count), limit: Some(limit), tier: None, reset: None }
     }
@@ -1537,11 +1657,34 @@ pub fn run() {
             update_check,
             log_ui,
             journal_show,
+            bug_capture,
+            bug_context,
+            reveal_file,
             update_install,
             update_install_file
         ])
         .run(tauri::generate_context!())
         .expect("échec du lancement de Verbatim");
+}
+
+/// `Verbatim.exe --capture-test image.png` : vérifie la capture et le
+/// presse-papiers sur le bureau (diagnostic).
+pub fn cli_capture_test(out: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow() };
+        let res = wincap::capture(hwnd).and_then(|s| wincap::png(&s).map(|p| (s, p))).and_then(|(s, p)| {
+            std::fs::write(out, &p).map_err(|e| e.to_string())?;
+            wincap::to_clipboard(&s, &p).map(|_| format!("{}x{}", s.width, s.height))
+        });
+        let _ = std::fs::write(format!("{out}.txt"), match &res { Ok(d) => format!("OK {d}"), Err(e) => format!("ÉCHEC {e}") });
+        res.is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = out;
+        false
+    }
 }
 
 /// `Verbatim.exe --install-update fichier rapport.txt` : installe une version

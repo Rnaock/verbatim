@@ -55,7 +55,7 @@ let S = {
   ready: false, version: '', key: null, settings: null, library: '', windows: true, simulated: false,
   items: {}, selected: null, query: '', hits: null, recording: null, live: null,
   progress: {}, balance: null, balanceError: null, devices: null, drawer: false, toast: null, dragging: false,
-  updates: false, update: null, updating: null, updateFile: null,
+  updates: false, update: null, updating: null, updateFile: null, report: null, quick: false,
   cal: { connected: false, now: [], next: null, error: null }, calState: null,
 };
 const subs = new Set();
@@ -158,6 +158,7 @@ const I = {
   pause: html`<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><rect x="3.5" y="2.5" width="3" height="11"/><rect x="9.5" y="2.5" width="3" height="11"/></svg>`,
   imp: html`<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2.5 11v2.5h11V11"/></svg>`,
   folder: html`<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 3.5h4.5l1.5 1.5h7v8.5h-13z"/></svg>`,
+  more: html`<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>`,
   cal: html`<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/></svg>`,
   swap: html`<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h9l-2.5-2.5M13 11H4l2.5 2.5"/></svg>`,
 };
@@ -246,6 +247,7 @@ function Top() {
     <${NowPill} />
     <span class="grow"></span>
     <label class="search">${I.search}<input type="search" placeholder="Rechercher dans les conversations" value=${q} onInput=${e => setQ(e.target.value)} /></label>
+    <${QuickMenu} />
     <button class="btn ghost" aria-label="Réglages" title="Réglages" onClick=${() => set({ drawer: true })}>${I.gear}</button>
   </div>`;
 }
@@ -1005,27 +1007,81 @@ function CalendarSettings() {
   </section>`;
 }
 
-// Boîte à idées : ouvre une « issue » GitHub pré-remplie, publiée avec ton
-// propre compte. Sur GitHub, tes idées sont marquées « Owner » et celles des
-// autres non : c'est ce qui permet de ne suivre que les tiennes sans vérification.
-function IdeaBox({ onClose }) {
+// Signaler un problème / proposer une idée : une « issue » GitHub pré-remplie,
+// publiée avec ton propre compte. GitHub marque tes publications « Owner »,
+// pas celles des autres : c'est ce qui distingue tes demandes.
+async function openReport(kind) {
+  set({ quick: false });
+  if (kind !== 'bug') { set({ report: { kind } }); return; }
+  // La capture est prise avant d'ouvrir la fenêtre de signalement.
+  await new Promise(r => setTimeout(r, 180));
+  let capture = null, captureErr = null;
+  try { capture = await invoke('bug_capture'); } catch (e) { captureErr = errMsg(e); }
+  let context = '';
+  try { context = await invoke('bug_context'); } catch (_) {}
+  set({ report: { kind, capture, captureErr, context } });
+}
+
+function ReportModal() {
+  const r = useStore(s => s.report);
   const repo = useStore(s => s.repo);
   const version = useStore(s => s.version);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
-  const text = () => `${body.trim()}\n\n---\nVerbatim ${version} · proposé depuis l’application`;
+  const [withCtx, setWithCtx] = useState(true);
+  useEffect(() => { setTitle(''); setBody(''); setWithCtx(true); }, [r]);
+  if (!r) return null;
+  const bug = r.kind === 'bug';
+  const close = () => set({ report: null });
+  const text = () => [body.trim(),
+    bug && r.capture && r.capture.clipboard ? '_(capture : coller ici avec Ctrl+V)_' : null,
+    bug && withCtx && r.context ? '---\n' + r.context : `---\nVerbatim ${version}`].filter(Boolean).join('\n\n');
   const send = () => {
-    const url = `https://github.com/${repo}/issues/new?` + new URLSearchParams({ title: 'Idée : ' + title.trim(), body: text(), labels: 'idée' }).toString();
-    openUrl(url); onClose();
+    const url = `https://github.com/${repo}/issues/new?` + new URLSearchParams({ title: (bug ? 'Bug : ' : 'Idée : ') + title.trim(), body: text(), labels: bug ? 'bug' : 'idée' }).toString();
+    openUrl(url);
+    toast(bug && r.capture && r.capture.clipboard ? 'Page GitHub ouverte : colle la capture avec Ctrl+V dans le texte.' : 'Page GitHub ouverte : il reste à valider.');
+    close();
   };
-  return html`<div class="stack">
-    <input class="inp" placeholder="En une phrase" value=${title} onInput=${e => setTitle(e.target.value)} />
-    <textarea class="inp" placeholder="Ce qui te gêne ou ce que tu voudrais, avec un exemple si possible" value=${body} onInput=${e => setBody(e.target.value)}></textarea>
-    <div class="row"><button class="btn small primary" disabled=${!title.trim() || !repo} onClick=${send}>Ouvrir sur GitHub</button>
-      <button class="btn small" disabled=${!title.trim()} onClick=${() => navigator.clipboard.writeText(title.trim() + '\n\n' + text()).then(() => toast('Idée copiée.'))}>Copier</button>
-      <button class="btn small ghost" onClick=${onClose}>Annuler</button></div>
-    <small class="muted">La page GitHub s’ouvre pré-remplie : il ne reste qu’à valider avec ton compte. Aucun enregistrement ni texte de conversation n’y est joint.</small>
+  return html`<div class="backdrop dim" onClick=${close}></div>
+  <div class="modal" role="dialog" aria-label=${bug ? 'Signaler un problème' : 'Proposer une idée'}>
+    <h2>${bug ? 'Signaler un problème' : 'Proposer une idée'}</h2>
+    <input class="inp" placeholder=${bug ? 'Ce qui ne va pas, en une phrase' : 'Ton idée, en une phrase'} value=${title} onInput=${e => setTitle(e.target.value)} />
+    <textarea class="inp" rows="4" placeholder=${bug ? 'Ce que tu faisais, ce qui s’est passé, ce que tu attendais' : 'Ce qui te gêne ou ce que tu voudrais, avec un exemple si possible'} value=${body} onInput=${e => setBody(e.target.value)}></textarea>
+    ${bug ? html`<div class="shot">
+        ${r.capture ? html`<img src=${r.capture.preview} alt="Capture de la fenêtre" />
+          <div class="stack" style="gap:6px">
+            <small>${r.capture.clipboard ? 'Capture de la fenêtre copiée : sur GitHub, colle-la avec Ctrl+V.' : 'Capture enregistrée : glisse le fichier dans la page GitHub.'}</small>
+            <button class="linkbtn" onClick=${() => invoke('reveal_file', { path: r.capture.path }).catch(e => toast(errMsg(e)))}>Afficher le fichier</button>
+          </div>`
+        : html`<small class="muted">Pas de capture : ${r.captureErr || 'indisponible'}.</small>`}
+      </div>
+      <label class="check inline"><input type="checkbox" checked=${withCtx} onChange=${e => setWithCtx(e.target.checked)} /> Joindre la version et la fin du journal</label>
+      ${withCtx ? html`<details><summary class="muted" style="cursor:pointer">Voir exactement ce qui sera joint</summary><pre class="ctx">${r.context}</pre></details>` : null}` : null}
+    <${Note} kind="warn">Publié sur GitHub, <b>visible par tous</b>. ${bug ? 'Vérifie que la capture ne montre pas de conversation privée (sinon, ne la colle pas). ' : ''}Le journal ne contient ni titre, ni nom, ni texte de conversation.<//>
+    <div class="row"><button class="btn primary" disabled=${!title.trim() || !repo} onClick=${send}>Ouvrir sur GitHub</button>
+      <button class="btn" disabled=${!title.trim()} onClick=${() => navigator.clipboard.writeText(title.trim() + '\n\n' + text()).then(() => toast('Copié.'))}>Copier le texte</button>
+      <span class="grow"></span><button class="btn ghost" onClick=${close}>Annuler</button></div>
   </div>`;
+}
+
+// Accès rapides : thème, signaler un problème, idée, journal.
+function QuickMenu() {
+  const open = useStore(s => s.quick);
+  const theme = useStore(s => s.settings.theme || 'auto');
+  return html`<span style="position:relative">
+    <button class="btn ghost" aria-label="Accès rapides" title="Thème, signaler un problème, idée" onClick=${() => set({ quick: !open })}>${I.more}</button>
+    <${Popover} open=${open} onClose=${() => set({ quick: false })} style="top:40px; right:0; width:250px">
+      <div class="head">Thème</div>
+      <div style="padding:2px 8px 8px"><div class="seg" role="radiogroup" aria-label="Thème" style="margin:0">
+        ${[['auto', 'Auto'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, t]) =>
+          html`<button role="radio" aria-checked=${theme === v} class=${theme === v ? 'on' : ''} onClick=${() => saveSettings({ theme: v })}>${t}</button>`)}
+      </div></div>
+      <div class="sep"></div>
+      <button class="item" onClick=${() => openReport('bug')}>Signaler un problème…</button>
+      <button class="item" onClick=${() => openReport('idea')}>Proposer une idée…</button>
+      <button class="item" onClick=${() => { set({ quick: false }); invoke('journal_show').catch(e => toast(errMsg(e))); }}>Ouvrir le journal</button>
+    <//>
+  </span>`;
 }
 
 function Drawer() {
@@ -1038,7 +1094,6 @@ function Drawer() {
   const simulated = useStore(s => s.simulated);
   const version = useStore(s => s.version);
   const updates = useStore(s => s.updates);
-  const [idea, setIdea] = useState(false);
   const [name, setName] = useState(settings.my_name);
   useEffect(() => { if (open) { invoke('devices').then(d => set({ devices: d })).catch(() => {}); fetchBalance(); setName(settings.my_name); } }, [open]);
   if (!open) return null;
@@ -1065,10 +1120,10 @@ function Drawer() {
     </section>
     <section><div class="label">Toi</div>
       <label class="field"><span>Ton prénom (donné à la voix du micro)</span><input class="inp" value=${name} onInput=${e => setName(e.target.value)} onBlur=${() => saveSettings({ my_name: name })} /></label>
-      <div class="field"><span>Thème</span><span class="seg" role="radiogroup" aria-label="Thème" style="margin-left:0">
+      <div class="field"><span>Thème</span><div class="seg" role="radiogroup" aria-label="Thème" style="margin-left:0">
         ${[['auto', 'Comme Windows'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, t]) =>
           html`<button role="radio" aria-checked=${(settings.theme || 'auto') === v} class=${(settings.theme || 'auto') === v ? 'on' : ''} onClick=${() => saveSettings({ theme: v })}>${t}</button>`)}
-      </span></div>
+      </div></div>
     </section>
     <${CalendarSettings} />
     <section><div class="label">Audio</div>
@@ -1113,9 +1168,9 @@ function Drawer() {
       <div class="stack"><span>Verbatim ${version}</span>
         <div class="row">${updates ? html`<button class="btn small" onClick=${() => checkUpdate(true)}>Rechercher une mise à jour</button>` : null}
           <button class="btn small" onClick=${() => installUpdate(null)}>Installer depuis un fichier…</button></div>
-        <div class="row"><button class="btn small" onClick=${() => setIdea(x => !x)}>Proposer une idée</button>
+        <div class="row"><button class="btn small" onClick=${() => { set({ drawer: false }); openReport('bug'); }}>Signaler un problème…</button>
+          <button class="btn small" onClick=${() => openReport('idea')}>Proposer une idée…</button>
           <button class="btn small ghost" title="Démarrages, périphériques, erreurs : sans titres, noms ni texte des conversations" onClick=${() => invoke('journal_show').catch(e => toast(errMsg(e)))}>Ouvrir le journal</button></div>
-        ${idea ? html`<${IdeaBox} onClose=${() => setIdea(false)} />` : null}
         <small class="muted">Une mise à jour remplace seulement le programme : conversations, clé et réglages restent en place. Tu peux aussi glisser un Verbatim.exe ou son zip dans la fenêtre.</small></div>
     </section>
   </aside>`;
@@ -1133,6 +1188,7 @@ function App() {
   if (failed) return html`<div class="page"><${Note} kind="err">Verbatim n’a pas pu démarrer : ${failed}<//></div>`;
   if (!ready) return null;
   return html`<div class=${'shell' + (dragging ? ' dragging' : '')}>
+    <${ReportModal} />
     <${Top} />
     <${UpdateBar} />
     <${RecBar} />
@@ -1145,6 +1201,35 @@ function App() {
     ${toastMsg ? html`<div class="toast" role="status">${toastMsg}</div>` : null}
   </div>`;
 }
+
+// Bulles d'explication : une seule bulle flottante, placée au-dessus ou en
+// dessous de l'élément et toujours entièrement dans la fenêtre.
+(function tips() {
+  const box = document.createElement('div');
+  box.className = 'tipbox';
+  box.setAttribute('role', 'tooltip');
+  let cur = null, timer = 0;
+  const show = el => {
+    cur = el;
+    box.textContent = el.dataset.tip;
+    if (!box.isConnected) document.body.appendChild(box);
+    const r = el.getBoundingClientRect(), b = box.getBoundingClientRect(), m = 8;
+    const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+    let top = r.top - b.height - 8;
+    if (top < m) top = Math.min(r.bottom + 8, vh - b.height - m);
+    const left = Math.max(m, Math.min(r.left + r.width / 2 - b.width / 2, vw - b.width - m));
+    box.style.top = top + 'px'; box.style.left = left + 'px';
+    box.classList.add('on');
+  };
+  const hide = () => { cur = null; clearTimeout(timer); box.classList.remove('on'); };
+  const enter = e => { const el = e.target.closest && e.target.closest('[data-tip]'); if (!el || el === cur) return; clearTimeout(timer); timer = setTimeout(() => show(el), 150); };
+  const leave = e => { const el = e.target.closest && e.target.closest('[data-tip]'); if (el && !el.contains(e.relatedTarget)) hide(); };
+  document.addEventListener('mouseover', enter);
+  document.addEventListener('mouseout', leave);
+  document.addEventListener('focusin', e => { const el = e.target.closest && e.target.closest('[data-tip]'); if (el) show(el); });
+  document.addEventListener('focusout', hide);
+  document.addEventListener('scroll', hide, true);
+})();
 
 // Erreurs de l'interface → journal (20 au plus par session).
 let uiErrors = 0;

@@ -1,4 +1,4 @@
-# Verbatim 4.2
+# Verbatim 4.3
 
 Enregistre et transcrit n’importe quelle conversation : ton micro, le son du
 PC (visio, appel, vidéo), ou les deux à la fois. Importe aussi les fichiers de
@@ -7,7 +7,7 @@ ElevenLabs Scribe v2, avec séparation des personnes.
 
 ## Installation
 
-1. **Avant d’extraire le zip** : clic droit sur `Verbatim-4.2.zip` →
+1. **Avant d’extraire le zip** : clic droit sur `Verbatim-4.3.zip` →
    Propriétés → coche **Débloquer** → OK.
 2. Extrais le dossier `Verbatim` où tu veux le garder. Garde les deux fichiers
    ensemble : `Verbatim.exe` a besoin de `WebView2Loader.dll` à côté de lui.
@@ -31,6 +31,16 @@ bibliothèque, avec les noms de locuteurs que tu avais donnés.
 
 ## Mises à jour
 
+**Qui peut publier une mise à jour ?** Seuls les comptes qui ont le droit
+d’écrire dans le dépôt : le tien, et Claude via l’application GitHub que tu
+as autorisée, seulement dans les sessions que tu lances. Un dépôt public se
+lit par tous, mais personne d’autre ne peut y écrire. Une proposition de
+modification (« pull request ») venue de l’extérieur n’entre dans le dépôt
+que si tu l’acceptes. Verbatim ne télécharge que depuis ce dépôt (adresse
+inscrite dans le programme) et vérifie l’empreinte du fichier. La vraie
+protection est donc ton compte GitHub : active la validation en deux étapes
+(GitHub → Settings → Password and authentication).
+
 Au lancement, Verbatim regarde s’il existe une version plus récente sur
 github.com/Rnaock/verbatim et l’annonce dans un bandeau : **Mettre à jour**
 télécharge, vérifie l’empreinte du fichier, remplace le programme et
@@ -49,7 +59,8 @@ conversation) ramène à l’accueil : enregistrer, importer, et à droite
 marque l’heure actuelle, et chaque rendez-vous déjà enregistré mène à sa
 conversation.
 
-Réglages → **Toi** → **Thème** : comme Windows, clair ou sombre.
+Le bouton **⋯** en haut à droite donne les accès rapides : thème (auto,
+clair, sombre), **Signaler un problème**, **Proposer une idée**, journal.
 
 ## Agenda Google
 
@@ -228,14 +239,26 @@ nouveaux essais, erreurs), de tes corrections de voix (en nombre seulement)
 et des plantages. Il ne contient ni clé, ni titre, ni nom, ni texte de
 conversation : il peut être partagé pour améliorer Verbatim.
 
-## Proposer une idée
+## Signaler un problème, proposer une idée
 
-Réglages → **Version** → **Proposer une idée** ouvre une page GitHub
-pré-remplie sur le dépôt de Verbatim. Tu la valides avec ton compte. Les
-idées publiées par le propriétaire du dépôt sont marquées « Owner » par
-GitHub. C’est ce qui distingue tes demandes de celles d’autres personnes,
-que les agents qui travaillent sur Verbatim traitent comme de simples
-suggestions (voir `CLAUDE.md` dans le dépôt).
+**⋯** → **Signaler un problème** : Verbatim prend une capture de sa fenêtre,
+la copie dans le presse-papiers et prépare un texte avec la version et la fin
+du journal (que tu peux lire avant). **Ouvrir sur GitHub** ouvre une page
+pré-remplie sur le dépôt de Verbatim : colle la capture avec Ctrl+V, puis
+valide. **Proposer une idée** fonctionne pareil, sans capture.
+
+C’est publié sur GitHub, **visible par tous** : ne colle pas une capture qui
+montre une conversation privée. Les captures restent aussi dans
+`%LOCALAPPDATA%\Verbatim\captures` (les 10 dernières).
+
+Pourquoi c’est sûr : GitHub publie chaque message sous le compte de la
+personne connectée. Quelqu’un qui installe Verbatim et propose une idée la
+publie sous **son** compte, pas sous le tien, et rien dans l’application ne
+permet de changer ça. Tes messages portent la mention « Owner » (propriétaire
+du dépôt), apposée par GitHub. Les agents qui travaillent sur Verbatim ne
+suivent que les demandes du compte `Rnaock`, vérifié auprès de GitHub et
+jamais d’après le texte du message. Ils traitent les autres comme de simples
+suggestions (règle écrite dans `CLAUDE.md`).
 
 ## Sécurité
 

@@ -10,6 +10,10 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = args.iter().position(|a| a == "--capture-test") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "capture-test.png".into());
+        std::process::exit(if verbatim_lib::cli_capture_test(&out) { 0 } else { 1 });
+    }
     if let Some(i) = args.iter().position(|a| a == "--install-update") {
         let file = args.get(i + 1).cloned().unwrap_or_default();
         let report = args.get(i + 2).cloned().unwrap_or_else(|| "verbatim-mise-a-jour.txt".into());
