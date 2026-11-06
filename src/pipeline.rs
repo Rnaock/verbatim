@@ -405,7 +405,9 @@ pub fn finish(lib: &Library, id: &str, plan: &Plan, responses: &[(Option<Role>, 
         created: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
         notes: plan.notes.clone(),
     });
-    if let Some(ev) = &item.event {
+    // Rendez-vous relu maintenant : ses noms ont pu être corrigés pendant l'envoi.
+    let event = lib.load(id).ok().and_then(|i| i.event).or_else(|| item.event.clone());
+    if let Some(ev) = &event {
         name_from_event(&mut t, ev, my_name);
     }
     // Transcription écrite avant de la déclarer courante : jamais de version
@@ -421,6 +423,7 @@ pub fn finish(lib: &Library, id: &str, plan: &Plan, responses: &[(Option<Role>, 
             mode: plan.mode,
             billed_seconds: plan.billed_seconds(),
             options: opts_json.clone(),
+            cost: None,
         });
         i.job = None;
     })?;

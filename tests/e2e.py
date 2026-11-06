@@ -132,6 +132,8 @@ class Up(http.server.BaseHTTPRequestHandler):
             return self._j(401, {"detail": {"message": "Invalid API key"}})
         att = UP["attempts"][fname] = UP["attempts"].get(fname, 0) + 1
         time.sleep(0.5)
+        if UP.get("quota"):
+            return self._j(401, {"detail": {"status": "quota_exceeded", "message": "This request exceeds your quota of 100000."}})
         if fname == "envoi-pc.flac" and att == 1:
             return self._j(429, {"detail": {"message": "Too many concurrent requests"}})
         UP["used"] += 200
@@ -269,7 +271,7 @@ try:
     q(".top button[aria-label=Réglages]")[0].click()
     W().until(lambda _: q(".drawer"))
     vtxt = js("return document.querySelector('.drawer').textContent")
-    check("section Version avec installation depuis un fichier", "Verbatim 4.1.0" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
+    check("section Version avec installation depuis un fichier", "Verbatim 4.2.0" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
     check("explications au survol dans les réglages", len(q(".drawer .tip[data-tip]")) >= 2)
     check("vocabulaire : +20 % sur toute la transcription", "20 %" in js("return [...document.querySelectorAll('.drawer .tip')].map(t => t.dataset.tip).join(' ')"))
     r = inv("update_install_file", "{path:'/tmp/photo.png'}")
@@ -287,6 +289,24 @@ try:
     ev_txt = text(".event")
     check("rendez-vous en cours affiché à l'accueil", "Point budget avec Claire" in ev_txt and "Claire Martin" in ev_txt and "en cours" in ev_txt.lower(), ev_txt)
     check("bouton « Rejoindre et enregistrer »", any("Rejoindre et enregistrer" in b.text for b in q(".event button")))
+    W().until(lambda _: q(".today .tev"))
+    td = text(".today")
+    check("accueil : agenda du jour avec repère « maintenant »", "Aujourd’hui" in td and "Point budget avec Claire" in td and q(".today .nowline") and q(".today .tev.live"), td)
+    q(".top button[aria-label=Réglages]")[0].click()
+    W().until(lambda _: q(".drawer"))
+    next(b for b in q(".drawer .seg button") if b.text == "Sombre").click()
+    W().until(lambda _: js("return document.documentElement.dataset.theme") == "dark")
+    next(b for b in q(".drawer button") if b.text == "Fermer").click()
+    time.sleep(0.4)
+    shot("v42_home_dark.png")
+    check("thème sombre choisi", js("return document.documentElement.dataset.theme") == "dark")
+    q(".top button[aria-label=Réglages]")[0].click()
+    W().until(lambda _: q(".drawer"))
+    next(b for b in q(".drawer .seg button") if b.text == "Clair").click()
+    W().until(lambda _: js("return document.documentElement.dataset.theme") == "light")
+    check("thème clair choisi", True)
+    next(b for b in q(".drawer button") if b.text == "Fermer").click()
+    time.sleep(0.3)
     r = inv("open_url", "{url:'https://meet.google.com/abc-defg-hij'}")
     r2 = inv("open_url", "{url:'https://meet.google.com.evil.example/x'}")
     check("liens de visio autorisés, imitations refusées", "err" in r2 and not ("err" in r and "refusée" in json.dumps(r, ensure_ascii=False)), (r, r2))
@@ -306,7 +326,15 @@ try:
     time.sleep(2)
     check("pause affichée", "paused" in q(".recbar")[0].get_attribute("class"))
     next(b for b in q(".recbar button") if b.text == "Reprendre").click()
-    time.sleep(7)
+    # Nom d'un participant corrigé pendant l'enregistrement : visible tout de suite.
+    pc = next(e for e in q(".evrow .pchip") if "Claire Martin" in e.text)
+    pc.click()
+    pin = q(".evrow .pchip-inp")[0]
+    pin.send_keys(Keys.CONTROL, "a")
+    pin.send_keys("Claire D", Keys.ENTER)
+    time.sleep(0.3)
+    check("participant renommé pendant l'enregistrement : affiché aussitôt", any(e.text == "Claire D" for e in q(".evrow .pchip")), [e.text for e in q(".evrow .pchip")])
+    time.sleep(6.5)
     shot("v4_recording.png")
     next(b for b in q(".recbar button") if "Arrêter" in b.text).click()
     W().until(lambda _: not q(".recbar"))
@@ -328,21 +356,23 @@ try:
     js("window.Verbatim.select(arguments[0])", it["id"])
     W().until(lambda _: len(q(".spk")) == 3)
     chips = [e.text for e in q(".spk")]
-    check("deux personnes au micro + une côté PC, nommée d'après le rendez-vous", any("Micro 1" in c for c in chips) and any("Micro 2" in c for c in chips) and any("Claire Martin" in c for c in chips), chips)
+    check("deux personnes au micro + une côté PC, nommée d'après le rendez-vous (nom corrigé)", any("Micro 1" in c for c in chips) and any("Micro 2" in c for c in chips) and any("Claire D" in c for c in chips), chips)
     whos = [e.text.lower() for e in q(".turn .who")]
-    check("tours dans l'ordre du temps", whos[:3] == ["micro 1", "claire martin", "micro 2"], whos)
+    check("tours dans l'ordre du temps", whos[:3] == ["micro 1", "claire d", "micro 2"], whos)
+    cl = text(".costline")
+    check("coût et solde affichés en fin de transcription", "Coût" in cl and "Reste" in cl and "crédits" in cl, cl)
     check("enregistrement lié au rendez-vous en cours", it.get("event") == "Point budget avec Claire", it.get("event"))
     me_chip = [e.text for e in q(".evrow .pchip")]
     check("ta propre adresse affichée avec ton prénom", any("(toi)" in c and "Moi" in c for c in me_chip), me_chip)
     plan = inv("estimate", "{id:'%s', mode:'auto'}" % it["id"])
     check("mode automatique : une seule piste mixée (coût ×1)", plan.get("ok", {}).get("mode") == "mixed" and plan["ok"]["parts"] == [None], plan)
     # Nom d'un participant corrigé : annuaire + voix renommée.
-    pc = next(e for e in q(".evrow .pchip") if "Claire Martin" in e.text)
+    pc = next(e for e in q(".evrow .pchip") if "Claire D" in e.text)
     pc.click()
     pin = q(".evrow .pchip-inp")[0]
     pin.send_keys(Keys.CONTROL, "a")
     pin.send_keys("Claire", Keys.ENTER)
-    W().until(lambda _: any(e.text.startswith("Claire") and "Martin" not in e.text for e in q(".spk")))
+    W().until(lambda _: any(e.text.startswith("Claire") and "Claire D" not in e.text for e in q(".spk")))
     check("participant renommé : voix et annuaire mis à jour", (state()["settings"].get("people") or {}).get("claire@example.org") == "Claire", state()["settings"].get("people"))
     # Saisie du titre pendant que la conversation est mise à jour (ancien bug).
     tf = q(".head .title")[0]
@@ -441,6 +471,29 @@ try:
     W(40).until(lambda _: len(UP["calls"]) > n0 and not (item_by_title("Mémo téléphone") or {}).get("job"))
     time.sleep(1)
     check("deuxième version conservée", len(os.listdir(os.path.join(LIB, memo["id"], "transcriptions"))) == 2)
+
+    print("=== Crédits insuffisants ===")
+    # 1. Solde trop bas : refus avant tout envoi.
+    used0, n0 = UP["used"], len(UP["calls"])
+    UP["used"] = 99_990
+    inv("transcribe", "{id:'%s', req:null}" % memo["id"])
+    W(30).until(lambda _: ((item_by_title("Mémo téléphone") or {}).get("job") or {}).get("state") == "error")
+    msg = item_by_title("Mémo téléphone")["job"]["message"]
+    check("solde insuffisant : refus clair, rien envoyé", "Plus assez de crédits" in msg and "il en reste 10" in msg and len(UP["calls"]) == n0, msg)
+    check("bouton « Recharger sur ElevenLabs »", any("Recharger" in b.text for b in q(".card button")))
+    # 2. ElevenLabs refuse en cours de route (quota) : pas de nouvel essai, audio intact.
+    UP["used"], UP["quota"] = used0, True
+    a0 = UP["attempts"].get("envoi-mix.flac", 0)
+    next(b for b in q(".card button") if b.text == "Relancer").click()
+    W(30).until(lambda _: ((item_by_title("Mémo téléphone") or {}).get("job") or {}).get("state") == "error" and UP["attempts"].get("envoi-mix.flac", 0) > a0)
+    time.sleep(1)
+    msg = item_by_title("Mémo téléphone")["job"]["message"]
+    check("quota dépassé : message clair, aucun nouvel essai", "Plus assez de crédits" in msg and UP["attempts"]["envoi-mix.flac"] == a0 + 1, (msg, UP["attempts"]))
+    check("audio conservé après l'échec", os.path.exists(os.path.join(LIB, memo["id"], "Mémo téléphone.wav")))
+    UP["quota"] = False
+    next(b for b in q(".card button") if b.text == "Relancer").click()
+    W(30).until(lambda _: (item_by_title("Mémo téléphone") or {}).get("job") is None and len(os.listdir(os.path.join(LIB, memo["id"], "transcriptions"))) == 3)
+    check("relance réussie après recharge", True)
     next(b for b in q(".sub button") if b.text == "Supprimer").click()
     next(b for b in q(".sub button") if b.text == "Mettre à la corbeille").click()
     W().until(lambda _: item_by_title("Mémo téléphone") is None)

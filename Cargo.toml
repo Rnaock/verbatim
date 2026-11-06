@@ -1,6 +1,6 @@
 [package]
 name = "verbatim"
-version = "4.1.0"
+version = "4.2.0"
 description = "Transcription audio avec séparation des locuteurs"
 edition = "2021"
 rust-version = "1.91"

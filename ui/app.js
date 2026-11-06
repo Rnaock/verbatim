@@ -85,7 +85,8 @@ const rates = settings => {
 /* ------------------------------------------------------------------ */
 async function refreshState() {
   const st = await invoke('app_state');
-  set({ ready: true, version: st.version, key: st.key, settings: st.settings, library: st.library, windows: st.windows, simulated: st.simulated_audio, updates: st.updates, recording: st.recording ? { id: st.recording } : null });
+  applyTheme(st.settings.theme);
+  set({ ready: true, version: st.version, key: st.key, settings: st.settings, library: st.library, windows: st.windows, simulated: st.simulated_audio, updates: st.updates, repo: st.repo, recording: st.recording ? { id: st.recording } : null });
   return st;
 }
 async function loadLibrary() {
@@ -104,7 +105,7 @@ async function fetchBalance() {
   }
 }
 async function saveSettings(patch) {
-  try { const s = await invoke('settings_set', { patch }); set({ settings: s }); return s; }
+  try { const s = await invoke('settings_set', { patch }); applyTheme(s.theme); set({ settings: s }); return s; }
   catch (e) { toast('Réglage non enregistré : ' + errMsg(e)); }
 }
 async function startRecording(title, event) {
@@ -128,6 +129,10 @@ async function importPaths(paths) {
     if (r.rejected.length) toast('Non importé (format non reconnu) : ' + r.rejected.join(', '));
     if (r.ids.length) set({ selected: r.ids[r.ids.length - 1] });
   } catch (e) { toast(errMsg(e)); }
+}
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
 }
 async function refreshCalendar(force) {
   try { set({ cal: await invoke('calendar_now', { force: !!force }) }); } catch (_) {}
@@ -235,7 +240,7 @@ function Top() {
     return () => clearTimeout(t);
   }, [q]);
   return html`<div class="top">
-    <span class="brand">Verbatim<b>.</b></span>
+    <button class="brand" title="Accueil" onClick=${() => set({ selected: null })}>Verbatim<b>.</b></button>
     <${RecordButton} />
     <button class="btn" onClick=${pickAndImport}>${I.imp} Importer</button>
     <${NowPill} />
@@ -441,7 +446,8 @@ function Welcome() {
   const [title, setTitle] = useState('');
   const toggle = k => saveSettings({ [k]: !settings[k] });
   const cal = useStore(s => s.cal);
-  return html`<div class="page">
+  return html`<div class="page home">
+    <div class="home-main">
     ${cal.now.length ? html`<div class="stack" style="margin-bottom:22px">${cal.now.map(e => html`<${EventCard} e=${e} />`)}</div>` : null}
     <div class="hero">Enregistre ou importe une conversation</div>
     <p class="muted">Elle rejoint ta bibliothèque, est transcrite par ElevenLabs, et chaque voix est séparée.</p>
@@ -467,7 +473,53 @@ function Welcome() {
         <div class="drop" onClick=${pickAndImport}>Glisse tes fichiers dans la fenêtre<br/>ou clique pour parcourir</div>
       </div>
     </div>
+    </div>
+    <${TodayAgenda} />
   </div>`;
+}
+
+// Agenda du jour : passé estompé, repère « maintenant », rendez-vous déjà
+// enregistrés reliés à leur conversation.
+function TodayAgenda() {
+  const cal = useStore(s => s.cal);
+  const items = useStore(s => s.items);
+  const recording = useStore(s => s.recording);
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick(x => x + 1), 30_000); return () => clearInterval(t); }, []);
+  const day = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+  if (!cal.connected) return html`<aside class="today"><div class="today-h"><b>Aujourd’hui</b><span class="muted">${day}</span></div>
+    <p class="muted" style="margin:8px 0 12px">Connecte ton agenda Google pour voir ici tes rendez-vous du jour, et lancer l’enregistrement d’un appel en un clic.</p>
+    <button class="btn small" onClick=${() => set({ drawer: true })}>${I.cal} Connecter l’agenda</button></aside>`;
+  const now = Date.now() / 1000;
+  const byUid = {};
+  Object.values(items).forEach(it => { if (it.event_uid) byUid[it.event_uid] = it; });
+  const rows = [];
+  let marked = false;
+  const marker = html`<div class="nowline"><span>${hhmm(new Date())}</span></div>`;
+  for (const e of cal.today) {
+    if (!marked && e.start > now) { rows.push(marker); marked = true; }
+    const rec = byUid[e.uid];
+    const past = e.end <= now, live = e.start - 600 <= now && now < e.end;
+    const ppl = others(e).map(p => p.name);
+    rows.push(html`<div class=${'tev' + (past ? ' past' : '') + (live ? ' live' : '')}>
+      <div class="tev-time mono">${hhmm(new Date(e.start * 1000))}<br/><span class="faint">${hhmm(new Date(e.end * 1000))}</span></div>
+      <div class="tev-body">
+        <div class="tev-title">${e.title}</div>
+        ${ppl.length ? html`<div class="tev-ppl">${ppl.slice(0, 4).join(', ')}${ppl.length > 4 ? ` +${ppl.length - 4}` : ''}</div>` : null}
+        <div class="row" style="gap:10px; margin-top:4px">
+          ${rec ? html`<button class="linkbtn" onClick=${() => set({ selected: rec.id })}>${rec.has_transcript ? 'Voir la transcription' : 'Voir l’enregistrement'}</button>`
+            : past ? html`<span class="faint">Non enregistré</span>`
+            : !recording ? html`${e.meet ? html`<button class="linkbtn" onClick=${() => joinAndRecord(e)}>Rejoindre et enregistrer</button>` : null}
+                <button class="linkbtn quiet" onClick=${() => startRecording(null, e.uid)}>Enregistrer</button>` : null}
+        </div>
+      </div>
+    </div>`);
+  }
+  if (!marked) rows.push(marker);
+  return html`<aside class="today"><div class="today-h"><b>Aujourd’hui</b><span class="muted">${day}</span></div>
+    ${cal.error ? html`<${Note} kind="warn">Agenda non mis à jour : ${cal.error}<//>` : null}
+    ${cal.today.length ? html`<div class="tlist">${rows}</div>` : html`<p class="muted" style="margin-top:8px">Aucun rendez-vous aujourd’hui.</p>`}
+  </aside>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -717,6 +769,7 @@ function TranscriptView({ detail, time, onSeek, reload }) {
       <button class="btn small ghost" title="Revenir à l’attribution d’origine" onClick=${async () => { try { setUndo([]); setT(await invoke('transcript_reset', { id })); } catch (e) { toast(errMsg(e)); } }}>Réinitialiser</button>
     </div>
     ${t.notes.map(n => html`<${Note} kind="info">${n}<//>`)}
+    <${CostLow} item=${detail.item} />
     <div>${turns.map(tr => html`<div class=${'turn' + (now && tr.segs.includes(now) ? ' now' : '')}>
       <button class="ts" onClick=${() => onSeek(tr.start)}>${clock(tr.start)}</button>
       <div>
@@ -724,7 +777,33 @@ function TranscriptView({ detail, time, onSeek, reload }) {
         ${tr.segs.map(seg => html`<${Paragraph} seg=${seg} transcript=${t} colorOf=${colorOf} onEdit=${edit} onSeek=${onSeek} />`)}
       </div>
     </div>`)}</div>
+    <${CostLine} item=${detail.item} />
   </div>`;
+}
+
+const fmtN = n => Math.round(n).toLocaleString('fr-FR');
+const fmtMin = m => m >= 90 ? `${Math.floor(m / 60)} h ${String(Math.round(m % 60)).padStart(2, '0')}` : `${Math.round(m)} min`;
+const currentRef = item => (item.transcripts || []).find(r => r.dir === item.current);
+
+// Fin de transcription : ce que ça a coûté, ce qui reste.
+function CostLine({ item }) {
+  const r = currentRef(item);
+  if (!r || !r.cost) return null;
+  const c = r.cost;
+  return html`<div class="costline">
+    <span>Coût : <b>${fmtN(c.actual != null ? c.actual : c.estimated)} crédits</b>${c.actual != null ? html` <span class="faint">(estimé ${fmtN(c.estimated)})</span>` : html` <span class="faint">(estimé)</span>`}</span>
+    ${c.remaining != null ? html`<span>Reste : <b>${fmtN(c.remaining)} crédits</b>${c.remaining_minutes != null ? ` ≈ ${fmtMin(c.remaining_minutes)} de transcription` : ''}</span>` : null}
+    ${c.note ? html`<span class=${/écart/.test(c.note) ? 'warn' : 'faint'}>${c.note}</span>` : null}
+  </div>`;
+}
+
+// Alerte visible en haut de la transcription quand le solde devient juste.
+function CostLow({ item }) {
+  const r = currentRef(item);
+  if (!r || !r.cost || !r.cost.low) return null;
+  const c = r.cost;
+  return html`<${Note} kind="warn">Il te reste ${c.remaining_minutes != null ? '≈ ' + fmtMin(c.remaining_minutes) + ' de transcription' : 'peu de crédits'} : sans doute pas assez pour une conversation de cette durée.
+    <button class="linkbtn" onClick=${() => openUrl('https://elevenlabs.io/app/subscription')}>Recharger</button><//>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -733,8 +812,10 @@ function TranscriptView({ detail, time, onSeek, reload }) {
 function JobCard({ item }) {
   const j = item.job;
   if (!j) return null;
+  const quota = j.state === 'error' && /crédits/i.test(j.message || '');
   if (j.state === 'error') return html`<div class="card"><${Note} kind="err">${j.message || 'Transcription interrompue.'}<//>
-    <div class="row"><button class="btn primary" onClick=${() => invoke('transcribe', { id: item.id, req: null }).catch(e => toast(errMsg(e)))}>Relancer</button>
+    <div class="row">${quota ? html`<button class="btn" onClick=${() => openUrl('https://elevenlabs.io/app/subscription')}>Recharger sur ElevenLabs</button>` : null}
+    <button class="btn primary" onClick=${() => { invoke('transcribe', { id: item.id, req: null }).catch(e => toast(errMsg(e))); fetchBalance(); }}>Relancer</button>
     <button class="btn ghost" onClick=${() => invoke('transcribe_cancel', { id: item.id })}>Ignorer</button></div></div>`;
   const label = { queued: 'En attente', preparing: 'Préparation de l’audio', uploading: 'Envoi à ElevenLabs', processing: 'Transcription par ElevenLabs' }[j.state] || j.state;
   const busy = j.state === 'processing' || j.state === 'queued' || j.progress == null;
@@ -783,10 +864,20 @@ function Player({ detail, audioRef, time, setTime, colorOf }) {
 function PersonChip({ p, itemId }) {
   const [edit, setEdit] = useState(false);
   const [v, setV] = useState(p.name);
-  useEffect(() => setV(p.name), [p.name]);
-  const save = () => { setEdit(false); const n = v.trim(); if (n && n !== p.name) invoke('person_rename', { id: itemId, email: p.email, name: n }).then(() => { refreshState(); refreshCalendar(); }).catch(e => toast(errMsg(e))); };
+  // Nom affiché tout de suite après validation, sans attendre le rechargement.
+  const [shown, setShown] = useState(null);
+  useEffect(() => { setV(p.name); setShown(null); }, [p.name]);
+  const save = () => {
+    setEdit(false);
+    const n = v.trim();
+    if (!n || n === p.name) { setV(p.name); return; }
+    setShown(n);
+    invoke('person_rename', { id: itemId, email: p.email, name: n })
+      .then(() => { refreshState(); refreshCalendar(); })
+      .catch(e => { setShown(null); setV(p.name); toast(errMsg(e)); });
+  };
   if (edit) return html`<input class="pchip-inp" value=${v} autofocus onInput=${e => setV(e.target.value)} onBlur=${save} onKeyDown=${e => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { setV(p.name); setEdit(false); } }} />`;
-  return html`<button class=${'pchip' + (p.guessed ? ' guessed' : '')} title=${p.email + (p.guessed ? ' · nom deviné, clique pour le corriger' : ' · clique pour corriger')} onClick=${() => setEdit(true)}>${p.name}${p.me ? ' (toi)' : ''}</button>`;
+  return html`<button class=${'pchip' + (p.guessed && !shown ? ' guessed' : '')} title=${p.email + (p.guessed ? ' · nom deviné, clique pour le corriger' : ' · clique pour corriger')} onClick=${() => setEdit(true)}>${shown || p.name}${p.me ? ' (toi)' : ''}</button>`;
 }
 
 function EventRow({ item }) {
@@ -828,10 +919,11 @@ function Detail({ id }) {
   const [retranscribe, setRetranscribe] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const audioRef = useRef();
-  const sig = sum ? [sum.state, sum.has_transcript, sum.title, Math.round(sum.duration || 0), sum.speakers.join('|'), sum.job && sum.job.state === 'error'].join('#') : '';
+  const sig = sum ? [sum.state, sum.has_transcript, sum.title, Math.round(sum.duration || 0), sum.speakers.join('|'), sum.job && sum.job.state === 'error', sum.event_uid, (sum.people || []).join('|'), sum.cost].join('#') : '';
   const load = useCallback(() => invoke('item_get', { id }).then(d => { setDetail(d); setLoadErr(null); }).catch(e => setLoadErr(errMsg(e))), [id]);
   useEffect(() => { setDetail(null); setTime(null); setRetranscribe(false); load(); }, [id]);
-  useEffect(() => { if (detail && !recording) load(); }, [sig]);
+  // Pendant l'enregistrement, seul le rendez-vous lié (titre, participants) est rechargé.
+  useEffect(() => { if (detail) load(); }, [recording ? (sum && [sum.event_uid, (sum.people || []).join('|')].join('#')) : sig]);
   const colorOf = useColors(detail && detail.transcript);
   const seek = t => { const a = audioRef.current; if (a) { a.currentTime = t; setTime(t); a.play().catch(() => {}); } };
   useEffect(() => {
@@ -846,6 +938,7 @@ function Detail({ id }) {
   // Juste après l'arrêt, le nom par défaut est sélectionné : on peut le remplacer en tapant.
   const nameNow = it.state === 'finalizing' && /^Enregistrement( \(\d+\))?$/.test(sum.title);
   return html`<div class="page">
+    <button class="back" onClick=${() => set({ selected: null })}>‹ Accueil</button>
     <div class="head"><${TitleField} id=${id} title=${sum.title} autoFocus=${nameNow} /></div>
     ${nameNow ? html`<small class="muted" style="display:block;margin:-4px 0 8px">Donne-lui un nom pendant la finalisation : tape simplement, puis Entrée.</small>` : null}
     <div class="sub">
@@ -912,6 +1005,29 @@ function CalendarSettings() {
   </section>`;
 }
 
+// Boîte à idées : ouvre une « issue » GitHub pré-remplie, publiée avec ton
+// propre compte. Sur GitHub, tes idées sont marquées « Owner » et celles des
+// autres non : c'est ce qui permet de ne suivre que les tiennes sans vérification.
+function IdeaBox({ onClose }) {
+  const repo = useStore(s => s.repo);
+  const version = useStore(s => s.version);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const text = () => `${body.trim()}\n\n---\nVerbatim ${version} · proposé depuis l’application`;
+  const send = () => {
+    const url = `https://github.com/${repo}/issues/new?` + new URLSearchParams({ title: 'Idée : ' + title.trim(), body: text(), labels: 'idée' }).toString();
+    openUrl(url); onClose();
+  };
+  return html`<div class="stack">
+    <input class="inp" placeholder="En une phrase" value=${title} onInput=${e => setTitle(e.target.value)} />
+    <textarea class="inp" placeholder="Ce qui te gêne ou ce que tu voudrais, avec un exemple si possible" value=${body} onInput=${e => setBody(e.target.value)}></textarea>
+    <div class="row"><button class="btn small primary" disabled=${!title.trim() || !repo} onClick=${send}>Ouvrir sur GitHub</button>
+      <button class="btn small" disabled=${!title.trim()} onClick=${() => navigator.clipboard.writeText(title.trim() + '\n\n' + text()).then(() => toast('Idée copiée.'))}>Copier</button>
+      <button class="btn small ghost" onClick=${onClose}>Annuler</button></div>
+    <small class="muted">La page GitHub s’ouvre pré-remplie : il ne reste qu’à valider avec ton compte. Aucun enregistrement ni texte de conversation n’y est joint.</small>
+  </div>`;
+}
+
 function Drawer() {
   const open = useStore(s => s.drawer);
   const settings = useStore(s => s.settings);
@@ -922,6 +1038,7 @@ function Drawer() {
   const simulated = useStore(s => s.simulated);
   const version = useStore(s => s.version);
   const updates = useStore(s => s.updates);
+  const [idea, setIdea] = useState(false);
   const [name, setName] = useState(settings.my_name);
   useEffect(() => { if (open) { invoke('devices').then(d => set({ devices: d })).catch(() => {}); fetchBalance(); setName(settings.my_name); } }, [open]);
   if (!open) return null;
@@ -948,6 +1065,10 @@ function Drawer() {
     </section>
     <section><div class="label">Toi</div>
       <label class="field"><span>Ton prénom (donné à la voix du micro)</span><input class="inp" value=${name} onInput=${e => setName(e.target.value)} onBlur=${() => saveSettings({ my_name: name })} /></label>
+      <div class="field"><span>Thème</span><span class="seg" role="radiogroup" aria-label="Thème" style="margin-left:0">
+        ${[['auto', 'Comme Windows'], ['light', 'Clair'], ['dark', 'Sombre']].map(([v, t]) =>
+          html`<button role="radio" aria-checked=${(settings.theme || 'auto') === v} class=${(settings.theme || 'auto') === v ? 'on' : ''} onClick=${() => saveSettings({ theme: v })}>${t}</button>`)}
+      </span></div>
     </section>
     <${CalendarSettings} />
     <section><div class="label">Audio</div>
@@ -992,6 +1113,9 @@ function Drawer() {
       <div class="stack"><span>Verbatim ${version}</span>
         <div class="row">${updates ? html`<button class="btn small" onClick=${() => checkUpdate(true)}>Rechercher une mise à jour</button>` : null}
           <button class="btn small" onClick=${() => installUpdate(null)}>Installer depuis un fichier…</button></div>
+        <div class="row"><button class="btn small" onClick=${() => setIdea(x => !x)}>Proposer une idée</button>
+          <button class="btn small ghost" title="Démarrages, périphériques, erreurs : sans titres, noms ni texte des conversations" onClick=${() => invoke('journal_show').catch(e => toast(errMsg(e)))}>Ouvrir le journal</button></div>
+        ${idea ? html`<${IdeaBox} onClose=${() => setIdea(false)} />` : null}
         <small class="muted">Une mise à jour remplace seulement le programme : conversations, clé et réglages restent en place. Tu peux aussi glisser un Verbatim.exe ou son zip dans la fenêtre.</small></div>
     </section>
   </aside>`;
@@ -1022,12 +1146,18 @@ function App() {
   </div>`;
 }
 
+// Erreurs de l'interface → journal (20 au plus par session).
+let uiErrors = 0;
+const logUi = m => { if (uiErrors++ < 20) invoke('log_ui', { message: String(m).slice(0, 300) }).catch(() => {}); };
+window.addEventListener('error', e => logUi(`${e.message} (${(e.filename || '').split('/').pop()}:${e.lineno})`));
+window.addEventListener('unhandledrejection', e => logUi('promesse : ' + (e.reason && e.reason.message || e.reason)));
+
 async function boot() {
   // Écoute d'abord : la reprise au démarrage peut finir avant le premier chargement.
   await Promise.all([
     listen('item', upsert),
     listen('item-removed', id => set(s => { const items = { ...s.items }; delete items[id]; return { items, selected: s.selected === id ? null : s.selected }; })),
-    listen('job', ({ id, job }) => set(s => s.items[id] ? { items: { ...s.items, [id]: { ...s.items[id], job } } } : {})),
+    listen('job', ({ id, job }) => { set(s => s.items[id] ? { items: { ...s.items, [id]: { ...s.items[id], job } } } : {}); if (!job || job.state === 'error') setTimeout(fetchBalance, 2500); }),
     listen('progress', p => set(s => ({ progress: { ...s.progress, [p.id]: p } }))),
     listen('rec-live', ({ id, live }) => set(s => ({ live, recording: s.recording && s.recording.id === id ? s.recording : { id } }))),
     listen('rec-error', ({ message }) => { toast('Enregistrement arrêté : ' + message); set({ recording: null, live: null }); }),

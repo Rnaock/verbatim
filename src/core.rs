@@ -209,9 +209,16 @@ pub struct Settings {
     pub pc_device_name: String,
     /// Dossier de la bibliothèque ; vide = Documents\Verbatim.
     pub library_dir: String,
+    /// Thème : « auto » (celui de Windows), « light » ou « dark ».
+    #[serde(default = "default_theme")]
+    pub theme: String,
     /// Annuaire : adresse e-mail (minuscules) → prénom ou nom affiché.
     #[serde(default)]
     pub people: std::collections::BTreeMap<String, String>,
+}
+
+fn default_theme() -> String {
+    "auto".into()
 }
 
 impl Default for Settings {
@@ -234,6 +241,7 @@ impl Default for Settings {
             pc_device_name: String::new(),
             library_dir: String::new(),
             people: Default::default(),
+            theme: default_theme(),
         }
     }
 }
@@ -299,6 +307,9 @@ pub fn apply_patch(s: &mut Settings, raw: &Value) {
     }
     if let Some(v) = o.get("library_dir").and_then(Value::as_str).filter(|v| dev(v)) {
         s.library_dir = v.into();
+    }
+    if let Some(v) = o.get("theme").and_then(Value::as_str).filter(|v| ["auto", "light", "dark"].contains(v)) {
+        s.theme = v.into();
     }
     if let Some(v) = o.get("people").and_then(Value::as_object) {
         s.people = v
@@ -423,7 +434,11 @@ fn detail(status: u16, body: &[u8]) -> String {
     if let Ok(v) = serde_json::from_slice::<Value>(body) {
         let d = &v["detail"];
         if let Some(m) = d.get("message").and_then(Value::as_str) {
-            return m.into();
+            // Le code « quota_exceeded » sert à reconnaître le manque de crédits.
+            return match d.get("status").and_then(Value::as_str).filter(|c| c.contains("quota")) {
+                Some(code) => format!("{m} [{code}]"),
+                None => m.into(),
+            };
         }
         if let Some(m) = d.as_str() {
             return m.into();
@@ -474,6 +489,19 @@ pub async fn balance(client: &reqwest::Client, api: &str, key: &str) -> Res<Bala
         reset: d["next_character_count_reset_unix"].as_i64(),
     })
 }
+
+impl Balance {
+    /// Crédits restants, si ElevenLabs les donne.
+    pub fn remaining(&self) -> Option<f64> {
+        Some((self.limit? - self.count?).max(0.0))
+    }
+}
+
+/// Coût estimé en crédits : minutes facturées × tarif, +20 % avec vocabulaire.
+pub fn estimate_credits(billed_seconds: f64, credits_per_min: f64, keyterms: bool) -> f64 {
+    billed_seconds / 60.0 * credits_per_min * if keyterms { KEYTERM_FACTOR } else { 1.0 }
+}
+pub const KEYTERM_FACTOR: f64 = 1.2;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Options {
@@ -709,7 +737,8 @@ mod tests {
         }
         assert!(!b.contains("x<y"));
         let e = transcribe_file(&http_client(), &api, "k", &audio, &opt, |_, _| {}).await.unwrap_err();
-        assert_eq!((e.status, e.message.as_str()), (429, "Too many"));
+        assert_eq!(e.status, 429);
+        assert!(e.message.starts_with("Too many"), "{}", e.message);
         let e = balance(&http_client(), &api, "k").await.unwrap_err();
         assert_eq!((e.status, e.message.as_str()), (401, "Invalid API key"));
         let e = transcribe_file(&http_client(), "http://127.0.0.1:9", "k", &audio, &opt, |_, _| {}).await.unwrap_err();

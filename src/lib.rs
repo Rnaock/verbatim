@@ -165,6 +165,7 @@ struct AppState {
     simulated_audio: bool,
     jobs: Vec<String>,
     updates: bool,
+    repo: Option<String>,
 }
 
 fn simulated_audio() -> bool {
@@ -183,6 +184,7 @@ fn app_state(st: St<'_>) -> AppState {
         simulated_audio: simulated_audio(),
         jobs: st.jobs.lock().unwrap().keys().cloned().collect(),
         updates: update::REPO.is_some(),
+        repo: update::REPO.map(String::from),
     }
 }
 
@@ -335,7 +337,17 @@ fn rec_start(app: AppHandle, st: St<'_>, mic: bool, pc: bool, title: Option<Stri
         }
     };
     let ticker_stop = Arc::new(AtomicBool::new(false));
-    trace(&format!("enregistrement {} : micro={mic} pc={pc} (micro {:?}, PC {:?})", item.id, s.mic_device, s.pc_device));
+    trace(&format!(
+        "enregistrement {} : micro={mic} pc={pc} (micro {:?}, PC {:?}), rendez-vous {}",
+        short_id(&item.id),
+        s.mic_device,
+        s.pc_device,
+        match (&ev, event.as_deref()) {
+            (Some(e), Some(_)) => format!("choisi ({} participants)", e.people.len()),
+            (Some(e), None) => format!("lié automatiquement ({} participants)", e.people.len()),
+            (None, _) => "aucun".into(),
+        }
+    ));
     *guard = Some(ActiveRec { id: item.id.clone(), recorder, ticker_stop: ticker_stop.clone() });
     drop(guard);
     emit_item(&app, &lib, &item.id);
@@ -426,10 +438,10 @@ fn stop_recording(app: &AppHandle, st: &Arc<App>) -> Res<String> {
         if let Err(e) = &stopped {
             let _ = lib.update(&id2, |i| i.error = Some(format!("Arrêt incomplet : {e}")));
         }
-        trace(&format!("arrêt {id2} : {stopped:?}"));
+        trace(&format!("arrêt {} : {stopped:?}", short_id(&id2)));
         let _busy = BusyGuard::new(&st2.busy);
         let res = pipeline::finalize_item(&lib, &id2, stopped.is_err(), |p| emit_progress(&app2, &id2, "finalize", p));
-        trace(&format!("finalisation {id2} : {}", match &res { Ok(_) => "ok".to_string(), Err(e) => e.to_string() }));
+        trace(&format!("finalisation {} : {}", short_id(&id2), match &res { Ok(it) => describe_tracks(it), Err(e) => format!("ÉCHEC {e}") }));
         emit_item(&app2, &lib, &id2);
         if res.is_ok() {
             let s = st2.settings();
@@ -544,7 +556,8 @@ fn open_folder(st: St<'_>, id: Option<String>) -> Res<()> {
 
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> Res<()> {
-    let allowed = url.starts_with("https://elevenlabs.io/") || calendar::is_meeting_url(&url);
+    let ideas = update::REPO.map(|r| format!("https://github.com/{r}/issues/new?")).filter(|p| url.starts_with(p.as_str())).is_some();
+    let allowed = url.starts_with("https://elevenlabs.io/") || calendar::is_meeting_url(&url) || ideas;
     if !allowed || url.chars().any(|c| c.is_whitespace() || c == '"') {
         return Err(ApiError::new(400, "adresse refusée"));
     }
@@ -648,25 +661,31 @@ struct CalNow {
     now: Vec<calendar::CalEvent>,
     /// Prochain rendez-vous de la journée, au-delà.
     next: Option<calendar::CalEvent>,
+    /// Toute la journée (accueil).
+    today: Vec<calendar::CalEvent>,
     error: Option<String>,
 }
 
 #[tauri::command]
 async fn calendar_now(st: St<'_>, force: Option<bool>) -> Res<CalNow> {
     if st.cal_url.lock().unwrap().is_none() {
-        return Ok(CalNow { connected: false, now: vec![], next: None, error: None });
+        return Ok(CalNow { connected: false, now: vec![], next: None, today: vec![], error: None });
     }
     let ev = match calendar_events(&st, force.unwrap_or(false)).await {
         Ok(ev) => ev,
-        Err(e) => return Ok(CalNow { connected: true, now: vec![], next: None, error: Some(e.message) }),
+        Err(e) => {
+            trace(&format!("agenda : lecture impossible ({})", e.status));
+            return Ok(CalNow { connected: true, now: vec![], next: None, today: vec![], error: Some(e.message) });
+        }
     };
     let now = chrono::Utc::now();
     let end_of_day = chrono::Local::now().date_naive().and_hms_opt(23, 59, 59).and_then(|d| d.and_local_timezone(chrono::Local).earliest()).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or(now + chrono::Duration::hours(12));
     let people = st.settings().people;
-    let list = with_my_name(calendar::events_between(&ev, now - chrono::Duration::hours(1), end_of_day.max(now + chrono::Duration::hours(1)), me_of(&st).as_deref(), &people), &st.settings().my_name);
-    let current = calendar::current(&list, now);
-    let next = list.iter().find(|e| e.start > now.timestamp() + calendar::LEAD_MIN * 60).cloned();
-    Ok(CalNow { connected: true, now: current, next, error: None })
+    let start_of_day = chrono::Local::now().date_naive().and_hms_opt(0, 0, 0).and_then(|d| d.and_local_timezone(chrono::Local).earliest()).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or(now - chrono::Duration::hours(12));
+    let today = with_my_name(calendar::events_between(&ev, start_of_day, end_of_day.max(now + chrono::Duration::hours(1)), me_of(&st).as_deref(), &people), &st.settings().my_name);
+    let current = calendar::current(&today, now);
+    let next = today.iter().find(|e| e.start > now.timestamp() + calendar::LEAD_MIN * 60).cloned();
+    Ok(CalNow { connected: true, now: current, next, today, error: None })
 }
 
 /// Rendez-vous proches d'un instant (pour lier une conversation après coup).
@@ -703,6 +722,7 @@ async fn item_link_event(app: AppHandle, st: St<'_>, id: String, event: Option<c
     let lib = st.lib();
     let item = lib.load(&id)?;
     let default_title = item.event.as_ref().map(|e| e.title == item.title).unwrap_or(false) || item.title.starts_with("Enregistrement");
+    trace(&format!("rendez-vous {} : {}", short_id(&id), if event.is_some() { "lié à la main" } else { "délié" }));
     let item = lib.update(&id, |i| {
         if let (Some(e), true) = (&event, default_title) {
             i.title = e.title.clone();
@@ -740,6 +760,7 @@ fn person_rename(app: AppHandle, st: St<'_>, id: Option<String>, email: String, 
         }
         core::save_settings(&st.paths, &json!({ "people": people }))?;
     }
+    trace(&format!("annuaire : nom {}{}", if name.is_empty() { "oublié" } else { "corrigé" }, id.as_deref().map(|i| format!(" (conversation {})", short_id(i))).unwrap_or_default()));
     let Some(id) = id else { return Ok(()) };
     if name.is_empty() {
         return Ok(());
@@ -778,9 +799,27 @@ fn ensure_idle(st: &App) -> Res<()> {
     Ok(())
 }
 
+/// Erreurs de l'interface, pour le journal (texte tronqué, jamais de contenu).
+#[tauri::command]
+fn log_ui(message: String) {
+    let m: String = message.chars().filter(|c| !c.is_control()).take(300).collect();
+    trace(&format!("interface : {m}"));
+}
+
+#[tauri::command]
+fn journal_show(app: AppHandle, st: St<'_>) -> Res<()> {
+    let p = st.paths.data_dir.join("journal.txt");
+    if !p.exists() {
+        return Err(ApiError::new(404, "journal vide pour l'instant"));
+    }
+    app.opener().reveal_item_in_dir(&p).map_err(|e| ApiError::new(500, e.to_string()))
+}
+
 #[tauri::command]
 async fn update_check(st: St<'_>) -> Res<Option<update::UpdateInfo>> {
-    let found = update::check(&st.http).await?;
+    let found = update::check(&st.http).await;
+    trace(&format!("mises à jour : {}", match &found { Ok(Some(u)) => format!("{} disponible", u.version), Ok(None) => "à jour".into(), Err(e) => format!("vérification impossible ({})", e.status) }));
+    let found = found?;
     *st.update.lock().unwrap() = found.clone();
     Ok(found)
 }
@@ -871,6 +910,21 @@ fn import_paths(app: AppHandle, st: St<'_>, paths: Vec<String>) -> Res<ImportOut
                 std::thread::spawn(move || {
                     let _busy = BusyGuard::new(&st2.busy);
                     let res = pipeline::import_fill(&lib2, &id, |p| emit_progress(&app2, &id, "import", p));
+                    trace(&format!(
+                        "import {} : {}",
+                        short_id(&id),
+                        match &res {
+                            Ok(it) => it.source.as_ref().map(|f| format!(
+                                ".{} {:.0} s, {} Mo{}{}",
+                                Path::new(&f.name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default(),
+                                it.duration.unwrap_or(0.0),
+                                f.size / 1_000_000,
+                                if f.video { ", vidéo" } else { "" },
+                                if f.decodable { "" } else { ", illisible par Verbatim (envoyé tel quel)" }
+                            )).unwrap_or_else(|| "ok".into()),
+                            Err(e) => format!("ÉCHEC {e}"),
+                        }
+                    ));
                     emit_item(&app2, &lib2, &id);
                     let s = st2.settings();
                     if res.is_ok() && s.auto_transcribe && st2.key().is_some() {
@@ -945,7 +999,14 @@ fn enqueue(app: &AppHandle, st: &Arc<App>, id: &str, opts: Options, mode: String
         let res = run_job(&app2, &st2, &id2, &opts, &mode).await;
         st2.jobs.lock().unwrap().remove(&id2);
         let lib = st2.lib();
-        trace(&format!("transcription {id2} : {}", match &res { Ok(()) => "ok".to_string(), Err(e) => format!("erreur {} {}", e.status, e.message) }));
+        trace(&format!(
+            "transcription {} : {}",
+            short_id(&id2),
+            match &res {
+                Ok(()) => st2.lib().load(&id2).ok().and_then(|i| st2.lib().current_transcript(&i)).map(|t| format!("ok, {} voix, {} paragraphes, mode {:?}", t.speakers.len(), t.segments.len(), t.mode)).unwrap_or_else(|| "ok".into()),
+                Err(e) => format!("ÉCHEC {} {}", e.status, e.message),
+            }
+        ));
         match res {
             Ok(()) => emit_job(&app2, &id2, None),
             Err(e) => {
@@ -960,13 +1021,20 @@ fn enqueue(app: &AppHandle, st: &Arc<App>, id: &str, opts: Options, mode: String
     st.jobs.lock().unwrap().insert(id.to_string(), handle);
 }
 
+/// Erreur « plus assez de crédits », d'où qu'elle vienne (refus d'ElevenLabs
+/// ou vérification préalable du solde).
+fn is_quota(e: &ApiError) -> bool {
+    let low = e.message.to_lowercase();
+    e.status == 402 || low.contains("quota") || low.contains("credit") || low.contains("crédit")
+}
+
 fn friendly(e: &ApiError) -> String {
     let d = e.message.as_str();
-    let low = d.to_lowercase();
     match e.status {
+        _ if e.status == 402 => d.to_string(),
+        _ if is_quota(e) => format!("Plus assez de crédits ElevenLabs pour cette transcription. L'audio est conservé : recharge ton compte, puis relance. ({d})"),
         0 => format!("Connexion à ElevenLabs impossible. Vérifie ta connexion internet. ({d})"),
         401 => format!("Clé refusée par ElevenLabs. ({d})"),
-        _ if low.contains("quota") || low.contains("credit") => format!("Crédits insuffisants sur le compte ElevenLabs. ({d})"),
         422 => format!("Paramètres refusés par ElevenLabs : {d}"),
         429 => format!("ElevenLabs est saturé, réessaie dans un moment. ({d})"),
         _ => d.to_string(),
@@ -985,11 +1053,35 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
     set("preparing", None, Some(0.0));
     let item = lib.load(id)?;
     let plan = pipeline::plan(&item, mode).map_err(|e| ApiError::new(400, e.to_string()))?;
-    let calibrate_from = if opts.keyterms.iter().all(|k| k.trim().is_empty()) && st.jobs.lock().unwrap().len() <= 1 {
-        core::balance(&st.http, &st.api, &key).await.ok().and_then(|b| b.count)
-    } else {
-        None
-    };
+    // Solde avant envoi : vérification préalable et mesure du coût réel.
+    let keyterms = opts.keyterms.iter().any(|k| !k.trim().is_empty());
+    let rate = st.settings().credits_per_min;
+    let estimated = core::estimate_credits(plan.billed_seconds(), rate, keyterms);
+    let before = core::balance(&st.http, &st.api, &key).await.ok();
+    let alone = st.jobs.lock().unwrap().len() <= 1;
+    trace(&format!(
+        "transcription {} : mode {:?}, {} envoi(s), {:.0} s facturées, vocabulaire {}, estimé {:.0} crédits, solde {}",
+        short_id(id),
+        plan.mode,
+        plan.parts.len(),
+        plan.billed_seconds(),
+        keyterms,
+        estimated,
+        before.as_ref().and_then(|b| b.remaining()).map(|r| format!("{r:.0}")).unwrap_or_else(|| "inconnu".into())
+    ));
+    if let Some(left) = before.as_ref().and_then(|b| b.remaining()) {
+        // Marge de 3 % : l'estimation n'est pas exacte au crédit près.
+        if left < estimated * 0.97 {
+            return Err(ApiError::new(
+                402,
+                format!(
+                    "Plus assez de crédits ElevenLabs : cette transcription demande environ {} crédits, il en reste {}. L'audio est conservé : recharge ton compte, puis relance.",
+                    fmt_int(estimated),
+                    fmt_int(left)
+                ),
+            ));
+        }
+    }
 
     // 1. Fichiers à envoyer.
     let (lib2, item2, plan2, app2, id2, st2) = (lib.clone(), item.clone(), plan.clone(), app.clone(), id.to_string(), st.clone());
@@ -1048,12 +1140,14 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
                     // Une coupure après l'envoi complet pourrait être facturée deux fois.
                     Err(e)
                         if attempt < RETRY_DELAYS.len()
+                            && !is_quota(&e)
                             && ([429, 503].contains(&e.status)
                                 || ([0, 500, 502, 504].contains(&e.status) && sent.lock().unwrap()[k] < size)) =>
                     {
                         drop(_req);
                         let d = RETRY_DELAYS[attempt];
                         attempt += 1;
+                        trace(&format!("  envoi {} : nouvel essai {attempt} après l'erreur {} ({})", short_id(&id), e.status, e.message.chars().take(120).collect::<String>()));
                         if let Ok(it) = pipeline::set_job(&lib, &id, "uploading", Some(format!("{} Nouvel essai dans {d} s.", friendly(&e))), None) {
                             emit_job(&app, &id, it.job);
                         }
@@ -1085,23 +1179,129 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
         .await
         .map_err(err)??;
 
-    // 4. Calibrage du coût réel (sans vocabulaire, une seule tâche à la fois).
-    if let Some(before) = calibrate_from {
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        if let Ok(b) = core::balance(&st.http, &st.api, &key).await {
-            let minutes = plan.billed_seconds() / 60.0;
-            if let Some(after) = b.count {
-                let rate = (after - before) / minutes;
-                if minutes >= 1.0 && (50.0..=3000.0).contains(&rate) && st.jobs.lock().unwrap().len() <= 1 {
-                    let prev = st.settings().credits_per_min;
-                    let next = if (prev - core::DEFAULT_CREDITS).abs() < 0.5 { rate } else { (prev + rate) / 2.0 };
-                    let _ = core::save_settings(&st.paths, &json!({ "credits_per_min": next.round() }));
-                    let _ = app.emit("settings-changed", ());
-                }
-            }
+    // 4. Coût réel : solde avant/après, comparé à l'estimation.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let after = core::balance(&st.http, &st.api, &key).await.ok();
+    let alone = alone && st.jobs.lock().unwrap().len() <= 1;
+    let cost = measure_cost(estimated, plan.billed_seconds(), rate, before.as_ref(), after.as_ref(), alone);
+    trace(&format!(
+        "coût {} : estimé {:.0}, réel {}, reste {}{}",
+        short_id(id),
+        estimated,
+        cost.actual.map(|a| format!("{a:.0}")).unwrap_or_else(|| "non mesuré".into()),
+        cost.remaining.map(|r| format!("{r:.0}")).unwrap_or_else(|| "inconnu".into()),
+        cost.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default()
+    ));
+    let rel = lib.load(id)?.current;
+    let cost2 = cost.clone();
+    lib.update(id, |i| {
+        if let Some(r) = i.transcripts.iter_mut().rev().find(|r| Some(&r.dir) == rel.as_ref()) {
+            r.cost = Some(cost2.clone());
+        }
+    })?;
+    // Calibrage du tarif (sans vocabulaire, mesure fiable, au moins une minute).
+    if let (Some(actual), false) = (cost.actual, keyterms) {
+        let minutes = plan.billed_seconds() / 60.0;
+        let measured = actual / minutes;
+        if minutes >= 1.0 && (50.0..=3000.0).contains(&measured) {
+            let next = if (rate - core::DEFAULT_CREDITS).abs() < 0.5 { measured } else { (rate + measured) / 2.0 };
+            let _ = core::save_settings(&st.paths, &json!({ "credits_per_min": next.round() }));
+            let _ = app.emit("settings-changed", ());
         }
     }
     Ok(())
+}
+
+fn fmt_int(x: f64) -> String {
+    let n = x.round().max(0.0) as u64;
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push('\u{202F}');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Résumé des pistes finalisées, pour le journal : durée, parole, gain, écho.
+fn describe_tracks(it: &library::Item) -> String {
+    let tracks: Vec<String> = it
+        .tracks
+        .iter()
+        .map(|t| format!("{} parole {:.0} % ({:.0} dBFS, bruit {:.0}), gain {:+.0} dB", t.role.stem(), t.activity.speech_ratio * 100.0, t.activity.speech_db, t.activity.floor_db, t.gain_db))
+        .collect();
+    format!(
+        "{:.0} s ; {} ; écho {}{}",
+        it.duration.unwrap_or(0.0),
+        tracks.join(" ; "),
+        it.echo.map(|e| format!("{e:.2}")).unwrap_or_else(|| "non mesurable".into()),
+        if it.recovered { " ; récupéré après interruption" } else { "" }
+    )
+}
+
+/// Début de l'identifiant (date et heure), sans le titre : le journal ne garde
+/// ni noms ni sujets de conversation.
+pub fn short_id(id: &str) -> String {
+    id.chars().take(16).collect()
+}
+
+/// Compare l'estimation au coût mesuré par le solde. La mesure n'est retenue que
+/// si elle est fiable : une seule transcription en cours, et pas de recharge ni
+/// de renouvellement d'abonnement entre les deux lectures.
+fn measure_cost(estimated: f64, billed_seconds: f64, rate: f64, before: Option<&core::Balance>, after: Option<&core::Balance>, alone: bool) -> library::Cost {
+    let remaining = after.and_then(|b| b.remaining()).or_else(|| before.and_then(|b| b.remaining()).map(|r| (r - estimated).max(0.0)));
+    let mut cost = library::Cost {
+        estimated: estimated.round(),
+        remaining: remaining.map(f64::round),
+        remaining_minutes: remaining.map(|r| r / rate.max(1.0)),
+        low: remaining.map(|r| r < estimated || r / rate.max(1.0) < 30.0).unwrap_or(false),
+        ..Default::default()
+    };
+    match (before.and_then(|b| b.count), after.and_then(|b| b.count), before.and_then(|b| b.limit), after.and_then(|b| b.limit)) {
+        (Some(c0), Some(c1), Some(l0), Some(l1)) if alone && (l0 - l1).abs() < 0.5 && c1 >= c0 => {
+            let actual = c1 - c0;
+            cost.actual = Some(actual.round());
+            if billed_seconds >= 30.0 && estimated > 0.0 {
+                let gap = (actual - estimated) / estimated;
+                if gap.abs() > 0.10 {
+                    cost.note = Some(format!("écart de {:+.0} % avec l'estimation", gap * 100.0));
+                }
+            }
+        }
+        (Some(_), Some(_), _, _) if !alone => cost.note = Some("coût non mesuré : plusieurs transcriptions en même temps".into()),
+        (Some(_), Some(_), _, _) => cost.note = Some("coût non mesuré : le solde a changé entre-temps (recharge ou renouvellement)".into()),
+        _ => cost.note = Some("coût non mesuré : solde indisponible".into()),
+    }
+    cost
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+    fn bal(count: f64, limit: f64) -> core::Balance {
+        core::Balance { count: Some(count), limit: Some(limit), tier: None, reset: None }
+    }
+
+    #[test]
+    fn cout_reel_et_ecarts() {
+        // 36 min, 330 crédits/min : 11 880 estimés, 11 900 réels → pas d'alerte.
+        let c = measure_cost(11880.0, 2160.0, 330.0, Some(&bal(10_000.0, 100_000.0)), Some(&bal(21_900.0, 100_000.0)), true);
+        assert_eq!((c.actual, c.note.as_deref(), c.low), (Some(11900.0), None, false));
+        assert_eq!(c.remaining, Some(78_100.0));
+        // Écart de +25 % signalé.
+        let c = measure_cost(10000.0, 1800.0, 330.0, Some(&bal(0.0, 100_000.0)), Some(&bal(12_500.0, 100_000.0)), true);
+        assert_eq!(c.note.as_deref(), Some("écart de +25 % avec l'estimation"));
+        // Recharge entre-temps : pas de mesure, pas de fausse alerte.
+        let c = measure_cost(10000.0, 1800.0, 330.0, Some(&bal(50_000.0, 100_000.0)), Some(&bal(60_000.0, 200_000.0)), true);
+        assert!(c.actual.is_none() && c.note.unwrap().contains("recharge"));
+        // Solde bas : moins que le coût d'une conversation de même durée.
+        let c = measure_cost(11880.0, 2160.0, 330.0, Some(&bal(80_000.0, 100_000.0)), Some(&bal(91_880.0, 100_000.0)), true);
+        assert!(c.low, "reste 8 120 < 11 880");
+        assert_eq!(fmt_int(1234567.0), "1\u{202F}234\u{202F}567");
+        assert_eq!(short_id("2026-11-03 14h00 Point avec Jean"), "2026-11-03 14h00");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,8 +1313,22 @@ fn attribution_save(app: AppHandle, st: St<'_>, id: String, attribution: Attribu
     let item = lib.load(&id)?;
     let rel = item.current.clone().ok_or(ApiError::new(404, "aucune transcription"))?;
     let mut t = lib.current_transcript(&item).ok_or(ApiError::new(404, "transcription illisible"))?;
+    let before = t.clone();
     t.apply(&attribution).map_err(|e| ApiError::new(400, e))?;
     lib.save_transcript(&item, &rel, &t)?;
+    // Les corrections disent où l'attribution automatique se trompe.
+    let moved = before.segments.iter().zip(&t.segments).filter(|(a, b)| a.speaker != b.speaker).count();
+    let renamed = t.speakers.iter().filter(|s| before.speakers.iter().any(|b| b.id == s.id && b.name != s.name)).count();
+    trace(&format!(
+        "correction {} : {} → {} voix, {} renommée(s), {}/{} paragraphe(s) réattribué(s), mode {:?}",
+        short_id(&id),
+        before.speakers.len(),
+        t.speakers.len(),
+        renamed,
+        moved,
+        t.segments.len(),
+        t.mode
+    ));
     let names: Vec<Value> = t.speakers.iter().map(|s| json!(s.name)).collect();
     let s = st.settings();
     let mut known: Vec<Value> = names.into_iter().filter(|n| !n.as_str().unwrap_or("").starts_with("Locuteur")).collect();
@@ -1171,7 +1385,22 @@ async fn pick_library_dir(app: AppHandle, st: St<'_>) -> Res<Option<String>> {
 pub fn run() {
     let paths = Paths::system();
     open_journal(paths.data_dir.join("journal.txt"));
-    trace(&format!("démarrage de Verbatim {}", core::VERSION));
+    {
+        let s = core::load_settings(&paths);
+        trace(&format!(
+            "démarrage de Verbatim {} ({}) : sources micro={} pc={}, mode {}, transcription auto {}, vocabulaire {} terme(s), thème {}, agenda {}, mises à jour {}",
+            core::VERSION,
+            std::env::consts::OS,
+            s.rec_mic,
+            s.rec_pc,
+            s.mode,
+            s.auto_transcribe,
+            s.keyterms.lines().filter(|l| !l.trim().is_empty()).count(),
+            s.theme,
+            if calendar::load_url(&paths).is_some() { "connecté" } else { "non connecté" },
+            if update::REPO.is_some() { "actives" } else { "désactivées" }
+        ));
+    }
     let settings = core::load_settings(&paths);
     let lib = Arc::new(Library::open(&paths.library(&settings)).or_else(|_| Library::open(&paths.out_dir)).expect("bibliothèque inaccessible"));
     let cal_url = calendar::load_url(&paths);
@@ -1228,7 +1457,7 @@ pub fn run() {
                 }
                 for id in lib.startup_scan() {
                     let _busy = BusyGuard::new(&st.busy);
-                    trace(&format!("reprise de {id}"));
+                    trace(&format!("reprise de {}", short_id(&id)));
                     let _ = pipeline::finalize_item(&lib, &id, true, |p| emit_progress(&handle, &id, "finalize", p));
                     emit_item(&handle, &lib, &id);
                 }
@@ -1306,6 +1535,8 @@ pub fn run() {
             item_link_event,
             person_rename,
             update_check,
+            log_ui,
+            journal_show,
             update_install,
             update_install_file
         ])

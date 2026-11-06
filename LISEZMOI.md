@@ -1,4 +1,4 @@
-# Verbatim 4.1
+# Verbatim 4.2
 
 Enregistre et transcrit n’importe quelle conversation : ton micro, le son du
 PC (visio, appel, vidéo), ou les deux à la fois. Importe aussi les fichiers de
@@ -7,7 +7,7 @@ ElevenLabs Scribe v2, avec séparation des personnes.
 
 ## Installation
 
-1. **Avant d’extraire le zip** : clic droit sur `Verbatim-4.1.zip` →
+1. **Avant d’extraire le zip** : clic droit sur `Verbatim-4.2.zip` →
    Propriétés → coche **Débloquer** → OK.
 2. Extrais le dossier `Verbatim` où tu veux le garder. Garde les deux fichiers
    ensemble : `Verbatim.exe` a besoin de `WebView2Loader.dll` à côté de lui.
@@ -40,6 +40,16 @@ Seul `Verbatim.exe` change. Tes conversations (`Documents\Verbatim`), ta clé,
 ton agenda et tes réglages (`%LOCALAPPDATA%\Verbatim`) ne sont jamais touchés.
 L’ancienne version est gardée sous `Verbatim.old.exe` jusqu’au lancement
 suivant. Réglages → **Version** permet aussi d’installer depuis un fichier.
+
+## Accueil
+
+Le logo **Verbatim.** en haut à gauche (ou « ‹ Accueil » au-dessus d’une
+conversation) ramène à l’accueil : enregistrer, importer, et à droite
+**l’agenda du jour**. Les rendez-vous passés sont estompés, un trait rouge
+marque l’heure actuelle, et chaque rendez-vous déjà enregistré mène à sa
+conversation.
+
+Réglages → **Toi** → **Thème** : comme Windows, clair ou sombre.
 
 ## Agenda Google
 
@@ -125,6 +135,16 @@ Panneau **Transcrire** d’une conversation :
   ou **Pistes séparées** (coût ×2).
 - Le coût estimé s’affiche avant de lancer, en euros et en crédits
   (ElevenLabs compte environ 330 crédits par minute d’audio).
+- À la fin de la transcription, une ligne indique **ce qu’elle a réellement
+  coûté** (mesuré sur ton solde avant et après), **ce qu’il reste**, et le
+  temps de transcription que ça représente. Un écart de plus de 10 % avec
+  l’estimation est signalé. Une recharge pendant la transcription est
+  reconnue et n’est pas comptée comme un écart. Si le solde ne suffit plus
+  pour une conversation de même durée, un bandeau orange te prévient.
+- **Plus assez de crédits** : Verbatim vérifie le solde avant d’envoyer quoi
+  que ce soit. S’il manque des crédits, ou si ElevenLabs refuse en cours de
+  route, rien n’est perdu : l’audio reste là, un bouton **Recharger sur
+  ElevenLabs** apparaît, puis **Relancer**.
 
 **Retranscrire…** garde la version précédente : rien n’est écrasé.
 
@@ -201,10 +221,21 @@ internet.
 `Verbatim.exe --selftest rapport.txt` vérifie le chiffrement de la clé, les
 dossiers et la chaîne audio, sans enregistrer.
 
-En cas de souci, `%LOCALAPPDATA%\Verbatim\journal.txt` garde la trace des
-démarrages, des périphériques utilisés, des erreurs et des plantages. Il ne
-contient ni la clé ni le texte des conversations. Envoie-le moi avec la
-description du problème.
+Réglages → **Version** → **Ouvrir le journal** montre `journal.txt`. Il
+garde la trace des démarrages, des périphériques, des enregistrements
+(durées, niveaux, écho), des transcriptions (mode, coût estimé et réel,
+nouveaux essais, erreurs), de tes corrections de voix (en nombre seulement)
+et des plantages. Il ne contient ni clé, ni titre, ni nom, ni texte de
+conversation : il peut être partagé pour améliorer Verbatim.
+
+## Proposer une idée
+
+Réglages → **Version** → **Proposer une idée** ouvre une page GitHub
+pré-remplie sur le dépôt de Verbatim. Tu la valides avec ton compte. Les
+idées publiées par le propriétaire du dépôt sont marquées « Owner » par
+GitHub. C’est ce qui distingue tes demandes de celles d’autres personnes,
+que les agents qui travaillent sur Verbatim traitent comme de simples
+suggestions (voir `CLAUDE.md` dans le dépôt).
 
 ## Sécurité
 

@@ -72,6 +72,24 @@ pub struct TranscriptRef {
     pub mode: Mode,
     pub billed_seconds: f64,
     pub options: Value,
+    /// Coût en crédits ElevenLabs : estimé, réel (solde avant/après), reste.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct Cost {
+    pub estimated: f64,
+    /// Mesuré par le solde ; absent si la mesure n'était pas fiable.
+    pub actual: Option<f64>,
+    pub remaining: Option<f64>,
+    /// Minutes de transcription restantes au tarif actuel.
+    pub remaining_minutes: Option<f64>,
+    /// Écart à signaler (> 10 %) ou raison de l'absence de mesure.
+    pub note: Option<String>,
+    /// Le solde ne suffira probablement pas pour une conversation de même durée.
+    #[serde(default)]
+    pub low: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -173,6 +191,12 @@ pub struct Summary {
     pub error: Option<String>,
     /// Titre du rendez-vous lié, s'il y en a un.
     pub event: Option<String>,
+    /// Identifiant de l'occurrence du rendez-vous (pour l'agenda du jour).
+    pub event_uid: Option<String>,
+    /// Noms des participants du rendez-vous.
+    pub people: Vec<String>,
+    /// Coût de la transcription courante (crédits), une fois mesuré.
+    pub cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -326,6 +350,14 @@ impl Library {
             recovered: item.recovered,
             error: item.error.clone(),
             event: item.event.as_ref().map(|e| e.title.clone()),
+            event_uid: item.event.as_ref().map(|e| e.uid.clone()),
+            people: item.event.as_ref().map(|e| e.people.iter().map(|p| p.name.clone()).collect()).unwrap_or_default(),
+            cost: item
+                .transcripts
+                .iter()
+                .find(|r| Some(&r.dir) == item.current.as_ref())
+                .and_then(|r| r.cost.as_ref())
+                .map(|c| c.actual.unwrap_or(c.estimated)),
         }
     }
 
@@ -500,7 +532,7 @@ impl Library {
             }
             let rel = format!("{TRANSCRIPTIONS}/import");
             item.current = Some(rel.clone());
-            item.transcripts.push(TranscriptRef { dir: rel.clone(), created: item.created.clone(), mode: Mode::Single, billed_seconds: 0.0, options: json!({}) });
+            item.transcripts.push(TranscriptRef { dir: rel.clone(), created: item.created.clone(), mode: Mode::Single, billed_seconds: 0.0, options: json!({}), cost: None });
             let ok = fs::rename(&p, d.join(&rel).join("brut.json")).is_ok()
                 && self.write(&item).is_ok()
                 && self.save_transcript(&item, &rel, &t).is_ok();
