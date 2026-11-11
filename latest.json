@@ -1,6 +1,6 @@
 {
- "version": "4.3.0",
- "sha256": "61792638c7c169636ddec56cadd4f953e35aed1e2d0fcef1f8dce9ccd0260e2e",
- "size": 10137600,
- "notes": "Accès rapides (bouton ⋯) : thème, signaler un problème avec capture de la fenêtre, proposer une idée. Bulles d’explication toujours lisibles, sélecteur de thème corrigé."
+ "version": "4.3.1",
+ "sha256": "8ae68ba64f44794c50bc43c6b49f2a8112dc199e53744209a69e866c5343a458",
+ "size": 10144768,
+ "notes": "Coût des transcriptions corrigé : Verbatim passe par l’API d’ElevenLabs, bien moins chère que le site. Le coût en crédits est maintenant mesuré sur ton compte, et Verbatim ne bloque plus jamais un envoi sur une estimation."
 }
