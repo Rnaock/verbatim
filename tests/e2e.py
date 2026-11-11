@@ -271,7 +271,7 @@ try:
     q(".top button[aria-label=Réglages]")[0].click()
     W().until(lambda _: q(".drawer"))
     vtxt = js("return document.querySelector('.drawer').textContent")
-    check("section Version avec installation depuis un fichier", "Verbatim 4.3.0" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
+    check("section Version avec installation depuis un fichier", "Verbatim 4.3.1" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
     check("explications au survol dans les réglages", len(q(".drawer .tip[data-tip]")) >= 2)
     check("vocabulaire : +20 % sur toute la transcription", "20 %" in js("return [...document.querySelectorAll('.drawer .tip')].map(t => t.dataset.tip).join(' ')"))
     r = inv("update_install_file", "{path:'/tmp/photo.png'}")
@@ -319,7 +319,7 @@ try:
     mt = text(".modal")
     ctx = js("const p=document.querySelector('.modal .ctx'); return p ? p.textContent : ''")
     check("signalement : capture absente hors Windows, sans blocage", "Pas de capture" in mt, mt[:300])
-    check("signalement : version et journal joints, sans titre de conversation", "Verbatim 4.3.0" in ctx and "Appel" not in ctx and "Claire" not in ctx, ctx[:400])
+    check("signalement : version et journal joints, sans titre de conversation", "Verbatim 4.3.1" in ctx and "Appel" not in ctx and "Claire" not in ctx, ctx[:400])
     check("avertissement « visible par tous »", "visible par tous" in mt)
     q(".modal input")[0].send_keys("Test")
     check("texte copiable une fois le titre saisi", next(b for b in q(".modal button") if b.text == "Copier le texte").is_enabled())
@@ -490,7 +490,7 @@ try:
     next(b for b in q("button") if b.text == "Retranscrire…").click()
     W().until(lambda _: any(b.text == "Retranscrire" for b in q("button")))
     cost = text(".cost")
-    check("coût estimé affiché", "€" in cost and "crédits" in cost, cost)
+    check("coût estimé affiché (tarif API en euros)", "€" in cost, cost)
     from selenium.webdriver.common.action_chains import ActionChains
     tips = q(".card .tip")
     if tips:
@@ -504,26 +504,25 @@ try:
     check("deuxième version conservée", len(os.listdir(os.path.join(LIB, memo["id"], "transcriptions"))) == 2)
 
     print("=== Crédits insuffisants ===")
-    # 1. Solde trop bas : refus avant tout envoi.
+    # 1. Solde qui paraît trop bas : Verbatim envoie quand même, ElevenLabs décide.
     used0, n0 = UP["used"], len(UP["calls"])
     UP["used"] = 99_990
     inv("transcribe", "{id:'%s', req:null}" % memo["id"])
-    W(30).until(lambda _: ((item_by_title("Mémo téléphone") or {}).get("job") or {}).get("state") == "error")
-    msg = item_by_title("Mémo téléphone")["job"]["message"]
-    check("solde insuffisant : refus clair, rien envoyé", "Plus assez de crédits" in msg and "il en reste 10" in msg and len(UP["calls"]) == n0, msg)
-    check("bouton « Recharger sur ElevenLabs »", any("Recharger" in b.text for b in q(".card button")))
+    W(30).until(lambda _: (item_by_title("Mémo téléphone") or {}).get("job") is None and len(os.listdir(os.path.join(LIB, memo["id"], "transcriptions"))) == 3)
+    check("solde apparemment bas : envoi tenté quand même, sans blocage", len(UP["calls"]) > n0)
     # 2. ElevenLabs refuse en cours de route (quota) : pas de nouvel essai, audio intact.
     UP["used"], UP["quota"] = used0, True
     a0 = UP["attempts"].get("envoi-mix.flac", 0)
-    next(b for b in q(".card button") if b.text == "Relancer").click()
+    inv("transcribe", "{id:'%s', req:null}" % memo["id"])
     W(30).until(lambda _: ((item_by_title("Mémo téléphone") or {}).get("job") or {}).get("state") == "error" and UP["attempts"].get("envoi-mix.flac", 0) > a0)
     time.sleep(1)
     msg = item_by_title("Mémo téléphone")["job"]["message"]
     check("quota dépassé : message clair, aucun nouvel essai", "Plus assez de crédits" in msg and UP["attempts"]["envoi-mix.flac"] == a0 + 1, (msg, UP["attempts"]))
+    check("bouton « Recharger sur ElevenLabs »", any("Recharger" in b.text for b in q(".card button")))
     check("audio conservé après l'échec", os.path.exists(os.path.join(LIB, memo["id"], "Mémo téléphone.wav")))
     UP["quota"] = False
     next(b for b in q(".card button") if b.text == "Relancer").click()
-    W(30).until(lambda _: (item_by_title("Mémo téléphone") or {}).get("job") is None and len(os.listdir(os.path.join(LIB, memo["id"], "transcriptions"))) == 3)
+    W(30).until(lambda _: (item_by_title("Mémo téléphone") or {}).get("job") is None and len(os.listdir(os.path.join(LIB, memo["id"], "transcriptions"))) == 4)
     check("relance réussie après recharge", True)
     next(b for b in q(".sub button") if b.text == "Supprimer").click()
     next(b for b in q(".sub button") if b.text == "Mettre à la corbeille").click()

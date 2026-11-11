@@ -1089,6 +1089,7 @@ fn transcribe(app: AppHandle, st: St<'_>, id: String, req: Option<TranscribeReq>
 fn transcribe_cancel(app: AppHandle, st: St<'_>, id: String) -> Res<()> {
     if let Some(h) = st.jobs.lock().unwrap().remove(&id) {
         h.abort();
+        trace(&format!("transcription {} : annulée", short_id(&id)));
     }
     let lib = st.lib();
     let _ = lib.update(&id, |i| i.job = None);
@@ -1162,35 +1163,31 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
     set("preparing", None, Some(0.0));
     let item = lib.load(id)?;
     let plan = pipeline::plan(&item, mode).map_err(|e| ApiError::new(400, e.to_string()))?;
-    // Solde avant envoi : vérification préalable et mesure du coût réel.
+    // Solde avant envoi : sert à mesurer le coût réel. Il ne bloque jamais :
+    // ElevenLabs décide, et refuse sans rien facturer si le compte est vide.
     let keyterms = opts.keyterms.iter().any(|k| !k.trim().is_empty());
-    let rate = st.settings().credits_per_min;
-    let estimated = core::estimate_credits(plan.billed_seconds(), rate, keyterms);
     let before = core::balance(&st.http, &st.api, &key).await.ok();
+    absorb_late_charge(&st, before.as_ref());
+    let rate = st.settings().learned_rate();
+    let estimated = rate.map(|r| core::estimate_credits(plan.billed_seconds(), r, keyterms));
+    let eur = api_eur(plan.billed_seconds(), keyterms);
     let alone = st.jobs.lock().unwrap().len() <= 1;
+    let left = before.as_ref().and_then(|b| b.remaining());
     trace(&format!(
-        "transcription {} : mode {:?}, {} envoi(s), {:.0} s facturées, vocabulaire {}, estimé {:.0} crédits, solde {}",
+        "transcription {} : mode {:?}, {} envoi(s), {:.0} s facturées, vocabulaire {}, estimé {} ({:.2} €), solde {}{}",
         short_id(id),
         plan.mode,
         plan.parts.len(),
         plan.billed_seconds(),
         keyterms,
-        estimated,
-        before.as_ref().and_then(|b| b.remaining()).map(|r| format!("{r:.0}")).unwrap_or_else(|| "inconnu".into())
-    ));
-    if let Some(left) = before.as_ref().and_then(|b| b.remaining()) {
-        // Marge de 3 % : l'estimation n'est pas exacte au crédit près.
-        if left < estimated * 0.97 {
-            return Err(ApiError::new(
-                402,
-                format!(
-                    "Plus assez de crédits ElevenLabs : cette transcription demande environ {} crédits, il en reste {}. L'audio est conservé : recharge ton compte, puis relance.",
-                    fmt_int(estimated),
-                    fmt_int(left)
-                ),
-            ));
+        estimated.map(|e| format!("{e:.0} crédits")).unwrap_or_else(|| "crédits inconnus".into()),
+        eur,
+        left.map(|r| format!("{r:.0}")).unwrap_or_else(|| "inconnu".into()),
+        match (estimated, left) {
+            (Some(e), Some(l)) if l < e => " (solde peut-être insuffisant, envoi quand même)",
+            _ => "",
         }
-    }
+    ));
 
     // 1. Fichiers à envoyer.
     let (lib2, item2, plan2, app2, id2, st2) = (lib.clone(), item.clone(), plan.clone(), app.clone(), id.to_string(), st.clone());
@@ -1292,11 +1289,12 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let after = core::balance(&st.http, &st.api, &key).await.ok();
     let alone = alone && st.jobs.lock().unwrap().len() <= 1;
-    let cost = measure_cost(estimated, plan.billed_seconds(), rate, before.as_ref(), after.as_ref(), alone);
+    let mut cost = measure_cost(estimated, plan.billed_seconds(), rate, before.as_ref(), after.as_ref(), alone);
+    cost.estimated_eur = (eur * 100.0).round() / 100.0;
     trace(&format!(
-        "coût {} : estimé {:.0}, réel {}, reste {}{}",
+        "coût {} : estimé {}, réel {}, reste {}{}",
         short_id(id),
-        estimated,
+        estimated.map(|e| format!("{e:.0}")).unwrap_or_else(|| "inconnu".into()),
         cost.actual.map(|a| format!("{a:.0}")).unwrap_or_else(|| "non mesuré".into()),
         cost.remaining.map(|r| format!("{r:.0}")).unwrap_or_else(|| "inconnu".into()),
         cost.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default()
@@ -1308,30 +1306,47 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
             r.cost = Some(cost2.clone());
         }
     })?;
-    // Calibrage du tarif (sans vocabulaire, mesure fiable, au moins une minute).
-    if let (Some(actual), false) = (cost.actual, keyterms) {
-        let minutes = plan.billed_seconds() / 60.0;
-        let measured = actual / minutes;
-        if minutes >= 1.0 && (50.0..=3000.0).contains(&measured) {
-            let next = if (rate - core::DEFAULT_CREDITS).abs() < 0.5 { measured } else { (rate + measured) / 2.0 };
-            let _ = core::save_settings(&st.paths, &json!({ "credits_per_min": next.round() }));
-            let _ = app.emit("settings-changed", ());
+    // Apprentissage du tarif réel du compte (minutes avec vocabulaire ×1,2).
+    {
+        let _g = st.settings_lock.lock().unwrap();
+        let s = st.settings();
+        let mut samples = s.rate_samples.clone();
+        let mut pending = None;
+        if let (Some(actual), Some(b)) = (cost.actual, after.as_ref()) {
+            let minutes = plan.billed_seconds() / 60.0 * if keyterms { core::KEYTERM_FACTOR } else { 1.0 };
+            if minutes > 0.0 {
+                samples.push([minutes, actual]);
+                pending = b.count.zip(b.limit).map(|(c, l)| [c, l]);
+            }
         }
+        let _ = core::save_settings(&st.paths, &json!({ "rate_samples": samples, "pending_charge": pending }));
     }
+    let _ = app.emit("settings-changed", ());
     Ok(())
 }
 
-fn fmt_int(x: f64) -> String {
-    let n = x.round().max(0.0) as u64;
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push('\u{202F}');
+/// Prix public de l'API ElevenLabs (Scribe : 0,22 $/h, vocabulaire +0,05 $/h), en euros.
+fn api_eur(billed_seconds: f64, keyterms: bool) -> f64 {
+    (0.22 + if keyterms { 0.05 } else { 0.0 }) * 0.92 * billed_seconds / 3600.0
+}
+
+/// ElevenLabs met parfois à jour le solde après coup : ce qui a été débité
+/// entre la fin de la transcription précédente et maintenant lui est rattaché,
+/// sauf recharge ou renouvellement entre-temps (plafond changé).
+fn absorb_late_charge(st: &App, now: Option<&core::Balance>) {
+    let _g = st.settings_lock.lock().unwrap();
+    let s = st.settings();
+    let Some([count_after, limit]) = s.pending_charge else { return };
+    let mut samples = s.rate_samples.clone();
+    if let (Some(c), Some(l), Some(last)) = (now.and_then(|b| b.count), now.and_then(|b| b.limit), samples.last_mut()) {
+        let late = c - count_after;
+        // Au-delà de 400 crédits/min, c'est sans doute autre chose (synthèse vocale…).
+        if (l - limit).abs() < 0.5 && late > 0.0 && late <= last[0] * 400.0 {
+            last[1] += late;
+            trace(&format!("coût : {late:.0} crédits débités après coup, rattachés à la transcription précédente"));
         }
-        out.push(c);
     }
-    out
+    let _ = core::save_settings(&st.paths, &json!({ "rate_samples": samples, "pending_charge": null }));
 }
 
 /// Résumé des pistes finalisées, pour le journal : durée, parole, gain, écho.
@@ -1359,20 +1374,26 @@ pub fn short_id(id: &str) -> String {
 /// Compare l'estimation au coût mesuré par le solde. La mesure n'est retenue que
 /// si elle est fiable : une seule transcription en cours, et pas de recharge ni
 /// de renouvellement d'abonnement entre les deux lectures.
-fn measure_cost(estimated: f64, billed_seconds: f64, rate: f64, before: Option<&core::Balance>, after: Option<&core::Balance>, alone: bool) -> library::Cost {
-    let remaining = after.and_then(|b| b.remaining()).or_else(|| before.and_then(|b| b.remaining()).map(|r| (r - estimated).max(0.0)));
+fn measure_cost(estimated: Option<f64>, billed_seconds: f64, rate: Option<f64>, before: Option<&core::Balance>, after: Option<&core::Balance>, alone: bool) -> library::Cost {
+    let remaining = after.and_then(|b| b.remaining()).or_else(|| before.and_then(|b| b.remaining()));
+    // Minutes restantes : seulement si le tarif réel est connu et non nul.
+    let per_min = rate.filter(|r| *r >= 0.5);
+    let remaining_minutes = remaining.zip(per_min).map(|(r, p)| r / p);
     let mut cost = library::Cost {
-        estimated: estimated.round(),
+        estimated: estimated.map(f64::round),
         remaining: remaining.map(f64::round),
-        remaining_minutes: remaining.map(|r| r / rate.max(1.0)),
-        low: remaining.map(|r| r < estimated || r / rate.max(1.0) < 30.0).unwrap_or(false),
+        remaining_minutes,
+        low: match (remaining, estimated, remaining_minutes) {
+            (Some(r), Some(e), Some(m)) => r < e || m < 30.0,
+            _ => false,
+        },
         ..Default::default()
     };
     match (before.and_then(|b| b.count), after.and_then(|b| b.count), before.and_then(|b| b.limit), after.and_then(|b| b.limit)) {
         (Some(c0), Some(c1), Some(l0), Some(l1)) if alone && (l0 - l1).abs() < 0.5 && c1 >= c0 => {
             let actual = c1 - c0;
             cost.actual = Some(actual.round());
-            if billed_seconds >= 30.0 && estimated > 0.0 {
+            if let Some(estimated) = estimated.filter(|e| billed_seconds >= 30.0 && *e >= 20.0) {
                 let gap = (actual - estimated) / estimated;
                 if gap.abs() > 0.10 {
                     cost.note = Some(format!("écart de {:+.0} % avec l'estimation", gap * 100.0));
@@ -1406,20 +1427,23 @@ mod cost_tests {
 
     #[test]
     fn cout_reel_et_ecarts() {
-        // 36 min, 330 crédits/min : 11 880 estimés, 11 900 réels → pas d'alerte.
-        let c = measure_cost(11880.0, 2160.0, 330.0, Some(&bal(10_000.0, 100_000.0)), Some(&bal(21_900.0, 100_000.0)), true);
-        assert_eq!((c.actual, c.note.as_deref(), c.low), (Some(11900.0), None, false));
-        assert_eq!(c.remaining, Some(78_100.0));
+        // Tarif connu (20 crédits/min) : 36 min, 720 estimés, 730 réels → pas d'alerte.
+        let c = measure_cost(Some(720.0), 2160.0, Some(20.0), Some(&bal(10_000.0, 100_000.0)), Some(&bal(10_730.0, 100_000.0)), true);
+        assert_eq!((c.actual, c.note.as_deref(), c.low), (Some(730.0), None, false));
+        assert_eq!(c.remaining, Some(89_270.0));
+        assert_eq!(c.remaining_minutes.map(|m| m.round()), Some(4464.0));
         // Écart de +25 % signalé.
-        let c = measure_cost(10000.0, 1800.0, 330.0, Some(&bal(0.0, 100_000.0)), Some(&bal(12_500.0, 100_000.0)), true);
+        let c = measure_cost(Some(1000.0), 1800.0, Some(33.0), Some(&bal(0.0, 100_000.0)), Some(&bal(1_250.0, 100_000.0)), true);
         assert_eq!(c.note.as_deref(), Some("écart de +25 % avec l'estimation"));
         // Recharge entre-temps : pas de mesure, pas de fausse alerte.
-        let c = measure_cost(10000.0, 1800.0, 330.0, Some(&bal(50_000.0, 100_000.0)), Some(&bal(60_000.0, 200_000.0)), true);
+        let c = measure_cost(Some(1000.0), 1800.0, Some(33.0), Some(&bal(50_000.0, 100_000.0)), Some(&bal(60_000.0, 200_000.0)), true);
         assert!(c.actual.is_none() && c.note.unwrap().contains("recharge"));
-        // Solde bas : moins que le coût d'une conversation de même durée.
-        let c = measure_cost(11880.0, 2160.0, 330.0, Some(&bal(80_000.0, 100_000.0)), Some(&bal(91_880.0, 100_000.0)), true);
+        // Tarif encore inconnu : ni estimation, ni alerte de solde.
+        let c = measure_cost(None, 2855.0, None, Some(&bal(76_264.0, 100_000.0)), Some(&bal(76_264.0, 100_000.0)), true);
+        assert_eq!((c.actual, c.estimated, c.low, c.note.as_deref()), (Some(0.0), None, false, None));
+        // Solde bas avec un tarif connu.
+        let c = measure_cost(Some(11880.0), 2160.0, Some(330.0), Some(&bal(80_000.0, 100_000.0)), Some(&bal(91_880.0, 100_000.0)), true);
         assert!(c.low, "reste 8 120 < 11 880");
-        assert_eq!(fmt_int(1234567.0), "1\u{202F}234\u{202F}567");
         assert_eq!(short_id("2026-11-03 14h00 Point avec Jean"), "2026-11-03 14h00");
     }
 }

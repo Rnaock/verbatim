@@ -212,9 +212,27 @@ pub struct Settings {
     /// Thème : « auto » (celui de Windows), « light » ou « dark ».
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Coût mesuré sur le compte : [minutes facturées (vocabulaire compté
+    /// ×1,2), crédits réellement débités], 20 dernières transcriptions.
+    #[serde(default)]
+    pub rate_samples: Vec<[f64; 2]>,
+    /// Solde juste après la dernière transcription [crédits utilisés, plafond] :
+    /// un débit tardif d'ElevenLabs lui est rattaché à la transcription suivante.
+    #[serde(default)]
+    pub pending_charge: Option<[f64; 2]>,
     /// Annuaire : adresse e-mail (minuscules) → prénom ou nom affiché.
     #[serde(default)]
     pub people: std::collections::BTreeMap<String, String>,
+}
+
+impl Settings {
+    /// Crédits par minute réellement débités sur ce compte, une fois au moins
+    /// 5 minutes mesurées. Le tarif public du site (330/min) ne s'applique
+    /// pas à l'API, qui est bien moins chère : seule la mesure fait foi.
+    pub fn learned_rate(&self) -> Option<f64> {
+        let (m, c) = self.rate_samples.iter().fold((0.0, 0.0), |(m, c), s| (m + s[0], c + s[1]));
+        (m >= 5.0).then(|| c / m)
+    }
 }
 
 fn default_theme() -> String {
@@ -242,6 +260,8 @@ impl Default for Settings {
             library_dir: String::new(),
             people: Default::default(),
             theme: default_theme(),
+            rate_samples: vec![],
+            pending_charge: None,
         }
     }
 }
@@ -307,6 +327,20 @@ pub fn apply_patch(s: &mut Settings, raw: &Value) {
     }
     if let Some(v) = o.get("library_dir").and_then(Value::as_str).filter(|v| dev(v)) {
         s.library_dir = v.into();
+    }
+    if let Some(v) = o.get("rate_samples").and_then(Value::as_array) {
+        let ok: Vec<[f64; 2]> = v
+            .iter()
+            .filter_map(|x| {
+                let a = x.as_array()?;
+                let (m, c) = (a.first()?.as_f64()?, a.get(1)?.as_f64()?);
+                (m.is_finite() && c.is_finite() && m > 0.0 && c >= 0.0 && c / m <= 5000.0).then_some([m, c])
+            })
+            .collect();
+        s.rate_samples = ok[ok.len().saturating_sub(20)..].to_vec();
+    }
+    if let Some(v) = o.get("pending_charge") {
+        s.pending_charge = v.as_array().and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?]));
     }
     if let Some(v) = o.get("theme").and_then(Value::as_str).filter(|v| ["auto", "light", "dark"].contains(v)) {
         s.theme = v.into();

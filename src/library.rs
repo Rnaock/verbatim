@@ -79,7 +79,11 @@ pub struct TranscriptRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Cost {
-    pub estimated: f64,
+    /// Estimation en crédits, si le tarif du compte est déjà connu.
+    pub estimated: Option<f64>,
+    /// Estimation en euros au tarif public de l'API.
+    #[serde(default)]
+    pub estimated_eur: f64,
     /// Mesuré par le solde ; absent si la mesure n'était pas fiable.
     pub actual: Option<f64>,
     pub remaining: Option<f64>,
@@ -357,7 +361,7 @@ impl Library {
                 .iter()
                 .find(|r| Some(&r.dir) == item.current.as_ref())
                 .and_then(|r| r.cost.as_ref())
-                .map(|c| c.actual.unwrap_or(c.estimated)),
+                .and_then(|c| c.actual.or(c.estimated)),
         }
     }
 

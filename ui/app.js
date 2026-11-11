@@ -13,7 +13,13 @@ const listen = (ev, fn) => T.event.listen(ev, e => fn(e.payload));
 /* Constantes et utilitaires                                           */
 /* ------------------------------------------------------------------ */
 // Vocabulaire spécifique : +20 % sur toute la transcription (tarif ElevenLabs).
-const USD_PER_HOUR = 0.22, KEYTERM_FACTOR = 1.2, USD_TO_EUR = 0.92;
+// Tarif public de l'API (ce que Verbatim utilise) : 0,22 $/h, vocabulaire +0,05 $/h.
+// En crédits, le coût dépend de l'abonnement : il est mesuré sur ton compte.
+const USD_PER_HOUR = 0.22, KEYTERM_USD_PER_HOUR = 0.05, KEYTERM_FACTOR = 1.2, USD_TO_EUR = 0.92;
+const learnedRate = st => {
+  const [m, c] = (st.rate_samples || []).reduce(([m, c], x) => [m + x[0], c + x[1]], [0, 0]);
+  return m >= 5 ? { perMin: c / m, minutes: m } : null;
+};
 const PALETTE = ['#2743E3', '#0E8A6D', '#B5651D', '#8A2E7A', '#2B8FA8', '#6A5ACD', '#A0522D', '#3F7D20'];
 const MODE_LABEL = { separate: 'pistes séparées', mixed: 'piste mixée', single: 'piste unique' };
 
@@ -76,8 +82,12 @@ function upsert(sum) { set(s => ({ items: { ...s.items, [sum.id]: sum } })); }
 
 const rates = settings => {
   const kt = parseKeyterms(settings.keyterms).terms.length > 0;
-  const f = kt ? KEYTERM_FACTOR : 1;
-  return { eurPerMin: USD_PER_HOUR * f * USD_TO_EUR / 60, creditsPerMin: settings.credits_per_min * f };
+  const lr = learnedRate(settings);
+  return {
+    eurPerMin: (USD_PER_HOUR + (kt ? KEYTERM_USD_PER_HOUR : 0)) * USD_TO_EUR / 60,
+    creditsPerMin: lr ? lr.perMin * (kt ? KEYTERM_FACTOR : 1) : null,
+    measured: lr ? lr.minutes : 0,
+  };
 };
 
 /* ------------------------------------------------------------------ */
@@ -638,7 +648,8 @@ function TranscribePanel({ detail, onCancel, retranscribe }) {
         <button class="btn primary" disabled=${busy || !plan || !(key && key.has_key)} onClick=${go}>${retranscribe ? 'Retranscrire' : 'Transcrire'}</button>
         ${onCancel ? html`<button class="btn ghost" onClick=${onCancel}>Annuler</button>` : null}
         <span class="grow"></span>
-        ${plan ? html`<span class="cost">${MODE_LABEL[plan.mode] || ''} · ${dur(plan.seconds)}${plan.parts.length > 1 ? ' × ' + plan.parts.length : ''} · ≈ ${num(billedMin * r.creditsPerMin)} crédits · ≈ ${eur(billedMin * r.eurPerMin)}</span>` : null}
+        ${plan ? html`<span class="cost">${MODE_LABEL[plan.mode] || ''} · ${dur(plan.seconds)}${plan.parts.length > 1 ? ' × ' + plan.parts.length : ''} · ≈ ${eur(billedMin * r.eurPerMin)}${r.creditsPerMin != null ? ` · ≈ ${num(billedMin * r.creditsPerMin)} crédits` : ''}</span>
+          ${r.creditsPerMin == null ? html`<${Tip} text="Le prix en euros est le tarif public de l’API. En crédits, ça dépend de ton abonnement : Verbatim le mesure sur ton compte après quelques transcriptions." />` : null}` : null}
       </div>
     </div>
   </div>`;
@@ -793,7 +804,9 @@ function CostLine({ item }) {
   if (!r || !r.cost) return null;
   const c = r.cost;
   return html`<div class="costline">
-    <span>Coût : <b>${fmtN(c.actual != null ? c.actual : c.estimated)} crédits</b>${c.actual != null ? html` <span class="faint">(estimé ${fmtN(c.estimated)})</span>` : html` <span class="faint">(estimé)</span>`}</span>
+    ${c.actual != null ? html`<span>Coût : <b>${fmtN(c.actual)} crédits</b>${c.estimated != null ? html` <span class="faint">(estimé ${fmtN(c.estimated)})</span>` : null}</span>`
+      : c.estimated != null ? html`<span>Coût estimé : <b>${fmtN(c.estimated)} crédits</b></span>` : null}
+    ${c.estimated_eur ? html`<span>Tarif API : <b>${eur(c.estimated_eur)}</b></span>` : null}
     ${c.remaining != null ? html`<span>Reste : <b>${fmtN(c.remaining)} crédits</b>${c.remaining_minutes != null ? ` ≈ ${fmtMin(c.remaining_minutes)} de transcription` : ''}</span>` : null}
     ${c.note ? html`<span class=${/écart/.test(c.note) ? 'warn' : 'faint'}>${c.note}</span>` : null}
   </div>`;
@@ -1098,7 +1111,8 @@ function Drawer() {
   useEffect(() => { if (open) { invoke('devices').then(d => set({ devices: d })).catch(() => {}); fetchBalance(); setName(settings.my_name); } }, [open]);
   if (!open) return null;
   const r = rates(settings);
-  const minutes = balance ? balance.left / r.creditsPerMin : 0;
+  // Temps restant : seulement quand le coût réel par minute est mesuré et non nul.
+  const minutes = balance && r.creditsPerMin >= 0.5 ? balance.left / r.creditsPerMin : null;
   const pickDev = (role, v, list) => {
     const name = (list.find(d => d[0] === v) || [])[1] || '';
     saveSettings(role === 'mic' ? { mic_device: v, mic_device_name: name } : { pc_device: v, pc_device_name: name });
@@ -1111,10 +1125,9 @@ function Drawer() {
     <section><div class="label">Solde</div>
       ${balance ? html`<div class="figs">
           <div class="fig"><div class="k">Crédits</div><div class="v">${num(balance.left)}</div></div>
-          <div class="fig"><div class="k">Soit</div><div class="v">${dur(minutes * 60)}</div></div>
-          <div class="fig"><div class="k">Valeur</div><div class="v" style="color:var(--accent)">${eur(minutes * r.eurPerMin)}</div></div></div>
+          <div class="fig"><div class="k">Soit</div><div class="v">${minutes != null ? dur(minutes * 60) : '…'}</div></div></div>
         <div class="gauge"><i class=${balance.limit && balance.left / balance.limit < 0.15 ? 'low' : ''} style=${`width:${balance.limit ? Math.min(100, balance.left / balance.limit * 100) : 0}%`}></i></div>
-        <small class="muted" style="display:block;margin-top:8px">Formule ${balance.tier}${balance.reset ? ' · renouvellement le ' + balance.reset.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' }) : ''} · ${num(settings.credits_per_min)} crédits/min ${settings.credits_per_min !== 330 ? '(mesuré)' : '(estimé)'}</small>
+        <small class="muted" style="display:block;margin-top:8px">Formule ${balance.tier}${balance.reset ? ' · renouvellement le ' + balance.reset.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' }) : ''} · ${r.creditsPerMin != null ? `${r.creditsPerMin < 10 ? r.creditsPerMin.toFixed(1).replace('.', ',') : num(r.creditsPerMin)} crédits par minute transcrite (mesuré sur ${Math.round(r.measured)} min)` : 'coût en crédits mesuré après quelques transcriptions'}</small>
         <div class="row" style="margin-top:10px"><button class="btn small" onClick=${fetchBalance}>Actualiser</button><button class="btn small primary" onClick=${() => openUrl('https://elevenlabs.io/app/subscription')}>Recharger</button></div>`
         : html`<span class="muted">${balanceError || 'Ajoute ta clé pour voir le solde.'}</span>`}
     </section>

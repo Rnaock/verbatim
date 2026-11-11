@@ -1,4 +1,4 @@
-# Verbatim 4.3
+# Verbatim 4.3.1
 
 Enregistre et transcrit n’importe quelle conversation : ton micro, le son du
 PC (visio, appel, vidéo), ou les deux à la fois. Importe aussi les fichiers de
@@ -144,18 +144,21 @@ Panneau **Transcrire** d’une conversation :
   supplément.
 - Pour un enregistrement à deux sources : **Automatique** (coût ×1, conseillé)
   ou **Pistes séparées** (coût ×2).
-- Le coût estimé s’affiche avant de lancer, en euros et en crédits
-  (ElevenLabs compte environ 330 crédits par minute d’audio).
+- Le coût estimé s’affiche avant de lancer, en euros, au tarif public de
+  l’API (environ 0,20 € de l’heure). Verbatim passe par l’API, bien moins
+  chère que la transcription sur le site d’ElevenLabs (330 crédits par minute
+  sur le site). En crédits, le coût dépend de ton abonnement : Verbatim le
+  **mesure sur ton compte**, puis l’affiche une fois 5 minutes transcrites.
 - À la fin de la transcription, une ligne indique **ce qu’elle a réellement
-  coûté** (mesuré sur ton solde avant et après), **ce qu’il reste**, et le
-  temps de transcription que ça représente. Un écart de plus de 10 % avec
-  l’estimation est signalé. Une recharge pendant la transcription est
-  reconnue et n’est pas comptée comme un écart. Si le solde ne suffit plus
-  pour une conversation de même durée, un bandeau orange te prévient.
-- **Plus assez de crédits** : Verbatim vérifie le solde avant d’envoyer quoi
-  que ce soit. S’il manque des crédits, ou si ElevenLabs refuse en cours de
-  route, rien n’est perdu : l’audio reste là, un bouton **Recharger sur
-  ElevenLabs** apparaît, puis **Relancer**.
+  coûté** (mesuré sur ton solde avant et après) et **ce qu’il reste**. Si
+  ElevenLabs débite après coup, ce débit est rattaché à la transcription
+  lors de la suivante. Une recharge entre-temps est reconnue. Un écart de
+  plus de 10 % avec l’estimation est signalé, et un bandeau orange prévient
+  quand le solde devient juste.
+- **Crédits** : Verbatim n’empêche jamais un envoi, c’est ElevenLabs qui
+  décide. S’il refuse faute de crédits, rien n’est facturé ni perdu : l’audio
+  reste là, un bouton **Recharger sur ElevenLabs** apparaît, puis
+  **Relancer**.
 
 **Retranscrire…** garde la version précédente : rien n’est écrasé.
 
