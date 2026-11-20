@@ -46,4 +46,6 @@ conversation : identifiants abrégés avec `short_id`.
    alors au lancement.
 4. Même branche : remplacer `Verbatim.zip` (dossier `Verbatim/` avec
    `Verbatim.exe`, `WebView2Loader.dll`, `LISEZMOI.md`,
-   `Diagnostic audio.cmd`). C'est le lien de téléchargement du `README.md`.
+   `Diagnostic audio.cmd`). Le workflow `.github/workflows/release.yml` de
+   cette branche crée alors la release GitHub (`v<version>`, avec le zip) :
+   c'est le lien de téléchargement du `README.md`. Vérifier qu'elle existe.

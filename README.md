@@ -10,7 +10,7 @@ audio et vidéo. La transcription sépare les personnes et te laisse les nommer.
 
 ## Télécharger
 
-**[Télécharger Verbatim.zip](https://github.com/Rnaock/verbatim/raw/mises-a-jour/Verbatim.zip)**
+**[Télécharger Verbatim.zip](https://github.com/Rnaock/verbatim/releases/latest/download/Verbatim.zip)**
 (Windows 10 ou 11, 64 bits, environ 4 Mo)
 
 ## Installation
