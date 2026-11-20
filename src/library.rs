@@ -123,6 +123,10 @@ pub struct Item {
     pub playback: Option<String>,
     pub source: Option<SourceFile>,
     pub echo: Option<f32>,
+    /// Fin du dernier son utile (secondes) : sert à ne pas envoyer une longue
+    /// fin silencieuse (enregistrement oublié).
+    #[serde(default)]
+    pub active_end: Option<f64>,
     #[serde(default)]
     pub recovered: bool,
     #[serde(default)]
@@ -173,6 +177,7 @@ impl Item {
             job: None,
             error: None,
             notes: vec![],
+            active_end: None,
             event: None,
         }
     }

@@ -362,11 +362,21 @@ fn rec_start(app: AppHandle, st: St<'_>, mic: bool, pc: bool, title: Option<Stri
         let mut devices: HashMap<String, String> = HashMap::new();
         let mut last_status: HashMap<String, String> = HashMap::new();
         let mut n = 0u64;
+        // Dernier instant (temps d'enregistrement) où une source a porté du son :
+        // sert à prévenir quand on a oublié d'arrêter.
+        let mut watch = QuietWatch::default();
         while !ticker_stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(100));
             let live: Option<LiveStatus> = st2.rec.lock().unwrap().as_ref().filter(|r| r.id == id).map(|r| r.recorder.live());
             let Some(live) = live else { break };
-            let _ = app.emit("rec-live", json!({ "id": id, "live": live }));
+            let (quiet, warn) = watch.update(live.elapsed, live.tracks.iter().any(|t| t.peak_db > QUIET_PEAK_DB));
+            if warn {
+                trace(&format!("  aucun son depuis {:.0} s (à {:.0} s) : rappel affiché", quiet, live.elapsed));
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
+                }
+            }
+            let _ = app.emit("rec-live", json!({ "id": id, "live": live, "quiet": quiet }));
             n += 1;
             let mut changed = false;
             for t in &live.tracks {
@@ -426,6 +436,33 @@ fn rec_pause(st: St<'_>, paused: bool) -> Res<()> {
     Ok(())
 }
 
+/// Crête en dessous de laquelle une source est considérée comme silencieuse.
+const QUIET_PEAK_DB: f32 = -35.0;
+/// Silence sur toutes les sources au bout duquel Verbatim demande si l'appel est fini.
+const QUIET_WARN: f64 = 120.0;
+
+/// Suit le silence commun à toutes les sources pendant un enregistrement.
+#[derive(Default)]
+struct QuietWatch {
+    last_sound: f64,
+    warned: bool,
+}
+
+impl QuietWatch {
+    /// `elapsed` : temps d'enregistrement (n'avance pas en pause). Renvoie la
+    /// durée de silence et s'il faut prévenir maintenant (une fois par silence).
+    fn update(&mut self, elapsed: f64, sound: bool) -> (f64, bool) {
+        if sound || elapsed < self.last_sound {
+            self.last_sound = elapsed;
+            self.warned = false;
+        }
+        let quiet = (elapsed - self.last_sound).max(0.0);
+        let warn = quiet >= QUIET_WARN && !self.warned;
+        self.warned |= warn;
+        (quiet, warn)
+    }
+}
+
 fn stop_recording(app: &AppHandle, st: &Arc<App>) -> Res<String> {
     let active = st.rec.lock().unwrap().take().ok_or(ApiError::new(404, "aucun enregistrement en cours"))?;
     active.ticker_stop.store(true, Ordering::SeqCst);
@@ -440,10 +477,18 @@ fn stop_recording(app: &AppHandle, st: &Arc<App>) -> Res<String> {
         if let Err(e) = &stopped {
             let _ = lib.update(&id2, |i| i.error = Some(format!("Arrêt incomplet : {e}")));
         }
-        trace(&format!("arrêt {} : {stopped:?}", short_id(&id2)));
+        trace(&format!(
+            "arrêt {} : {}",
+            short_id(&id2),
+            match &stopped {
+                Ok(s) => format!("{:.1} s, pistes en direct {}, écoute en direct {}", s.duration, s.streamed.tracks.iter().all(|t| t.flac_ok), s.streamed.mix_seconds.is_some()),
+                Err(e) => format!("ÉCHEC {e}"),
+            }
+        ));
         let _busy = BusyGuard::new(&st2.busy);
-        let res = pipeline::finalize_item(&lib, &id2, stopped.is_err(), |p| emit_progress(&app2, &id2, "finalize", p));
-        trace(&format!("finalisation {} : {}", short_id(&id2), match &res { Ok(it) => describe_tracks(it), Err(e) => format!("ÉCHEC {e}") }));
+        let t0 = std::time::Instant::now();
+        let res = pipeline::finalize_item_with(&lib, &id2, stopped.is_err(), stopped.as_ref().ok().map(|s| &s.streamed), |p| emit_progress(&app2, &id2, "finalize", p));
+        trace(&format!("finalisation {} en {:.1} s : {}", short_id(&id2), t0.elapsed().as_secs_f64(), match &res { Ok(it) => describe_tracks(it), Err(e) => format!("ÉCHEC {e}") }));
         emit_item(&app2, &lib, &id2);
         if res.is_ok() {
             let s = st2.settings();
@@ -1289,7 +1334,7 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let after = core::balance(&st.http, &st.api, &key).await.ok();
     let alone = alone && st.jobs.lock().unwrap().len() <= 1;
-    let mut cost = measure_cost(estimated, plan.billed_seconds(), rate, before.as_ref(), after.as_ref(), alone);
+    let (mut cost, measured) = measure_cost(estimated, plan.billed_seconds(), rate, before.as_ref(), after.as_ref(), alone);
     cost.estimated_eur = (eur * 100.0).round() / 100.0;
     trace(&format!(
         "coût {} : estimé {}, réel {}, reste {}{}",
@@ -1312,7 +1357,7 @@ async fn run_job(app: &AppHandle, st: &Arc<App>, id: &str, opts: &Options, mode:
         let s = st.settings();
         let mut samples = s.rate_samples.clone();
         let mut pending = None;
-        if let (Some(actual), Some(b)) = (cost.actual, after.as_ref()) {
+        if let (Some(actual), Some(b)) = (measured, after.as_ref()) {
             let minutes = plan.billed_seconds() / 60.0 * if keyterms { core::KEYTERM_FACTOR } else { 1.0 };
             if minutes > 0.0 {
                 samples.push([minutes, actual]);
@@ -1374,7 +1419,9 @@ pub fn short_id(id: &str) -> String {
 /// Compare l'estimation au coût mesuré par le solde. La mesure n'est retenue que
 /// si elle est fiable : une seule transcription en cours, et pas de recharge ni
 /// de renouvellement d'abonnement entre les deux lectures.
-fn measure_cost(estimated: Option<f64>, billed_seconds: f64, rate: Option<f64>, before: Option<&core::Balance>, after: Option<&core::Balance>, alone: bool) -> library::Cost {
+/// Renvoie aussi le débit brut mesuré (même nul), pour l'apprentissage du tarif.
+fn measure_cost(estimated: Option<f64>, billed_seconds: f64, rate: Option<f64>, before: Option<&core::Balance>, after: Option<&core::Balance>, alone: bool) -> (library::Cost, Option<f64>) {
+    let mut measured = None;
     let remaining = after.and_then(|b| b.remaining()).or_else(|| before.and_then(|b| b.remaining()));
     // Minutes restantes : seulement si le tarif réel est connu et non nul.
     let per_min = rate.filter(|r| *r >= 0.5);
@@ -1392,10 +1439,15 @@ fn measure_cost(estimated: Option<f64>, billed_seconds: f64, rate: Option<f64>, 
     match (before.and_then(|b| b.count), after.and_then(|b| b.count), before.and_then(|b| b.limit), after.and_then(|b| b.limit)) {
         (Some(c0), Some(c1), Some(l0), Some(l1)) if alone && (l0 - l1).abs() < 0.5 && c1 >= c0 => {
             let actual = c1 - c0;
+            measured = Some(actual);
             cost.actual = Some(actual.round());
             if let Some(estimated) = estimated.filter(|e| billed_seconds >= 30.0 && *e >= 20.0) {
                 let gap = (actual - estimated) / estimated;
-                if gap.abs() > 0.10 {
+                if actual < 0.2 * estimated {
+                    // ElevenLabs débite souvent après coup : ce n'est pas un écart.
+                    cost.actual = None;
+                    cost.note = Some("débit pas encore visible sur le compte (ElevenLabs l'applique parfois plus tard)".into());
+                } else if gap.abs() > 0.10 {
                     cost.note = Some(format!("écart de {:+.0} % avec l'estimation", gap * 100.0));
                 }
             }
@@ -1404,12 +1456,23 @@ fn measure_cost(estimated: Option<f64>, billed_seconds: f64, rate: Option<f64>, 
         (Some(_), Some(_), _, _) => cost.note = Some("coût non mesuré : le solde a changé entre-temps (recharge ou renouvellement)".into()),
         _ => cost.note = Some("coût non mesuré : solde indisponible".into()),
     }
-    cost
+    (cost, measured)
 }
 
 #[cfg(test)]
 mod cost_tests {
     use super::*;
+
+    #[test]
+    fn rappel_enregistrement_oublie() {
+        let mut w = QuietWatch::default();
+        assert_eq!(w.update(10.0, true), (0.0, false));
+        assert_eq!(w.update(100.0, false), (90.0, false));
+        assert_eq!(w.update(130.0, false), (120.0, true), "prévient au bout de 2 min de silence");
+        assert_eq!(w.update(200.0, false), (190.0, false), "une seule fois par silence");
+        assert_eq!(w.update(201.0, true), (0.0, false));
+        assert!(w.update(330.0, false).1, "prévient de nouveau au silence suivant");
+    }
 
     #[test]
     fn journal_partage_sans_titres() {
@@ -1428,21 +1491,25 @@ mod cost_tests {
     #[test]
     fn cout_reel_et_ecarts() {
         // Tarif connu (20 crédits/min) : 36 min, 720 estimés, 730 réels → pas d'alerte.
-        let c = measure_cost(Some(720.0), 2160.0, Some(20.0), Some(&bal(10_000.0, 100_000.0)), Some(&bal(10_730.0, 100_000.0)), true);
+        let (c, _) = measure_cost(Some(720.0), 2160.0, Some(20.0), Some(&bal(10_000.0, 100_000.0)), Some(&bal(10_730.0, 100_000.0)), true);
         assert_eq!((c.actual, c.note.as_deref(), c.low), (Some(730.0), None, false));
         assert_eq!(c.remaining, Some(89_270.0));
         assert_eq!(c.remaining_minutes.map(|m| m.round()), Some(4464.0));
         // Écart de +25 % signalé.
-        let c = measure_cost(Some(1000.0), 1800.0, Some(33.0), Some(&bal(0.0, 100_000.0)), Some(&bal(1_250.0, 100_000.0)), true);
+        let (c, _) = measure_cost(Some(1000.0), 1800.0, Some(33.0), Some(&bal(0.0, 100_000.0)), Some(&bal(1_250.0, 100_000.0)), true);
         assert_eq!(c.note.as_deref(), Some("écart de +25 % avec l'estimation"));
         // Recharge entre-temps : pas de mesure, pas de fausse alerte.
-        let c = measure_cost(Some(1000.0), 1800.0, Some(33.0), Some(&bal(50_000.0, 100_000.0)), Some(&bal(60_000.0, 200_000.0)), true);
+        let (c, _) = measure_cost(Some(1000.0), 1800.0, Some(33.0), Some(&bal(50_000.0, 100_000.0)), Some(&bal(60_000.0, 200_000.0)), true);
         assert!(c.actual.is_none() && c.note.unwrap().contains("recharge"));
         // Tarif encore inconnu : ni estimation, ni alerte de solde.
-        let c = measure_cost(None, 2855.0, None, Some(&bal(76_264.0, 100_000.0)), Some(&bal(76_264.0, 100_000.0)), true);
+        let (c, _) = measure_cost(None, 2855.0, None, Some(&bal(76_264.0, 100_000.0)), Some(&bal(76_264.0, 100_000.0)), true);
         assert_eq!((c.actual, c.estimated, c.low, c.note.as_deref()), (Some(0.0), None, false, None));
+        // Débit pas encore visible (ElevenLabs débite après coup) : pas de faux écart de -100 %.
+        let (c, measured) = measure_cost(Some(829.0), 5431.0, Some(9.2), Some(&bal(1590.0, 37_472.0)), Some(&bal(1590.0, 37_472.0)), true);
+        assert_eq!((c.actual, measured), (None, Some(0.0)));
+        assert!(c.note.unwrap().contains("pas encore visible"));
         // Solde bas avec un tarif connu.
-        let c = measure_cost(Some(11880.0), 2160.0, Some(330.0), Some(&bal(80_000.0, 100_000.0)), Some(&bal(91_880.0, 100_000.0)), true);
+        let (c, _) = measure_cost(Some(11880.0), 2160.0, Some(330.0), Some(&bal(80_000.0, 100_000.0)), Some(&bal(91_880.0, 100_000.0)), true);
         assert!(c.low, "reste 8 120 < 11 880");
         assert_eq!(short_id("2026-11-03 14h00 Point avec Jean"), "2026-11-03 14h00");
     }

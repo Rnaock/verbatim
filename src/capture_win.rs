@@ -638,7 +638,7 @@ pub fn record_check(seconds: f64) -> (Vec<String>, bool) {
     }
     crate::trace("arrêt de l'enregistrement");
     let duration = match rec.stop() {
-        Ok(d) => d,
+        Ok(d) => d.duration,
         Err(e) => return (vec![format!("Arrêt impossible : {e}")], false),
     };
     let mut ok = (duration - seconds).abs() < 1.0;

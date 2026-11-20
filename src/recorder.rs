@@ -12,15 +12,18 @@
 //!   pour que micro et PC restent alignés à quelques dizaines de ms près.
 //!
 //! Les pistes sont écrites en WAV avec un point de contrôle toutes les deux
-//! secondes ; `finalize` les convertit ensuite en FLAC. Après un plantage,
-//! `finalize` sait repartir des WAV interrompus.
+//! secondes (filet de sécurité). En parallèle, pendant l'enregistrement, chaque
+//! piste est compressée en FLAC, son enveloppe est calculée, et un mélange
+//! d'écoute en 16 kHz est écrit au fil de l'eau : à l'arrêt il ne reste qu'à
+//! vérifier. Après un plantage, `finalize` repart des WAV interrompus.
 
-use crate::audio::{self, Activity, EnvelopeBuilder, FlacWriter, Resampler, WavReader, WavWriter, STORE_RATE};
+use crate::audio::{self, Activity, EnvelopeBuilder, FlacWriter, Resampler, WavReader, WavWriter, ENV_FPS, STORE_RATE, UPLOAD_RATE};
+use std::collections::VecDeque;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -212,6 +215,9 @@ pub struct TrackShared {
     pub status: Mutex<SourceStatus>,
     pub write_error: Mutex<Option<String>>,
     pub gaps: AtomicU64,
+    /// Gain visé pour le mélange d'écoute (millièmes de dB), mis à jour au fil
+    /// de l'enregistrement d'après le niveau de parole mesuré.
+    pub gain_target: Arc<AtomicI32>,
 }
 
 impl TrackShared {
@@ -223,6 +229,7 @@ impl TrackShared {
             status: Mutex::new(SourceStatus::new(SourceState::Starting, None, None)),
             write_error: Mutex::new(None),
             gaps: AtomicU64::new(0),
+            gain_target: Arc::new(AtomicI32::new(0)),
         }
     }
 
@@ -242,9 +249,120 @@ impl TrackShared {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mélange en direct : la piste d'écoute (16 kHz) s'écrit pendant l'appel
+// ---------------------------------------------------------------------------
+/// Bloc de mélange : 10 ms à 24 kHz.
+const MIX_BLOCK: usize = 240;
+/// Variation maximale du gain par bloc (6 dB par seconde) : pas de saut audible.
+const MIX_SLEW_DB: f32 = 0.06;
+/// Retard toléré d'une piste avant de la compter comme silencieuse.
+const MIX_MAX_LAG: usize = STORE_RATE as usize * 20;
+
+/// Reçoit les échantillons de chaque piste (déjà alignés sur la ligne de temps,
+/// 24 kHz), les mélange à niveaux de parole égalisés et écrit `ecoute.flac`.
+pub struct Mixer {
+    queues: Vec<VecDeque<f32>>,
+    /// Échantillons comptés comme silence faute d'être arrivés : à sauter ensuite.
+    debt: Vec<usize>,
+    targets: Vec<Arc<AtomicI32>>,
+    gains_db: Vec<f32>,
+    rs: Resampler,
+    flac: Option<FlacWriter>,
+    block: Vec<f32>,
+    out: Vec<f32>,
+}
+
+pub fn playback_path(dir: &Path) -> PathBuf {
+    dir.join("ecoute.flac")
+}
+
+impl Mixer {
+    fn new(dir: &Path, targets: Vec<Arc<AtomicI32>>) -> io::Result<Self> {
+        let n = targets.len();
+        Ok(Mixer {
+            queues: (0..n).map(|_| VecDeque::with_capacity(STORE_RATE as usize)).collect(),
+            debt: vec![0; n],
+            gains_db: vec![0.0; n],
+            targets,
+            rs: Resampler::new(STORE_RATE, UPLOAD_RATE),
+            flac: Some(FlacWriter::create(&playback_path(dir), UPLOAD_RATE)?),
+            block: Vec::with_capacity(MIX_BLOCK),
+            out: Vec::with_capacity(MIX_BLOCK),
+        })
+    }
+
+    fn push(&mut self, idx: usize, mut samples: &[f32]) {
+        if self.flac.is_none() {
+            return;
+        }
+        let skip = self.debt[idx].min(samples.len());
+        self.debt[idx] -= skip;
+        samples = &samples[skip..];
+        self.queues[idx].extend(samples.iter().copied());
+        let ready = self.queues.iter().map(|q| q.len()).min().unwrap_or(0);
+        let longest = self.queues.iter().map(|q| q.len()).max().unwrap_or(0);
+        // Une piste en retard de plus de 20 s (écriture en panne) ne bloque pas le mélange.
+        let n = ready.max(longest.saturating_sub(MIX_MAX_LAG));
+        self.mix(n - n % MIX_BLOCK);
+    }
+
+    fn mix(&mut self, mut n: usize) {
+        while n > 0 {
+            let len = n.min(MIX_BLOCK);
+            n -= len;
+            for (g, t) in self.gains_db.iter_mut().zip(&self.targets) {
+                let target = t.load(Ordering::Relaxed) as f32 / 1000.0;
+                *g += (target - *g).clamp(-MIX_SLEW_DB, MIX_SLEW_DB);
+            }
+            self.block.clear();
+            self.block.resize(len, 0.0);
+            for (k, q) in self.queues.iter_mut().enumerate() {
+                let g = audio::db_to_gain(self.gains_db[k]);
+                let have = q.len().min(len);
+                for (o, s) in self.block.iter_mut().zip(q.drain(..have)) {
+                    *o += s * g;
+                }
+                self.debt[k] += len - have;
+            }
+            for o in self.block.iter_mut() {
+                *o = mix_sample(*o, 0.0);
+            }
+            self.out.clear();
+            self.rs.push(&self.block, &mut self.out);
+            self.write();
+        }
+    }
+
+    fn write(&mut self) {
+        if let Some(f) = self.flac.as_mut() {
+            if !self.out.is_empty() && f.write(&self.out).is_err() {
+                self.flac = None; // la piste d'écoute sera refaite à la finalisation
+            }
+        }
+        self.out.clear();
+    }
+
+    /// Mélange ce qui reste et ferme le fichier. Renvoie sa durée en secondes.
+    fn finish(mut self) -> Option<f64> {
+        let longest = self.queues.iter().map(|q| q.len()).max().unwrap_or(0);
+        self.mix(longest);
+        self.out.clear();
+        self.rs.finish(&mut self.out);
+        self.write();
+        let frames = self.flac.take()?.finish().ok()?;
+        Some(frames as f64 / UPLOAD_RATE as f64)
+    }
+}
+
 struct TrackWriter {
     shared: Arc<TrackShared>,
     wav: WavWriter,
+    /// Compression en direct de la piste (le WAV reste le filet de sécurité).
+    flac: Option<FlacWriter>,
+    env: EnvelopeBuilder,
+    mixer: Option<(Arc<Mutex<Mixer>>, usize)>,
+    next_gain_at: usize,
     rs: Option<Resampler>,
     timeline: Arc<Mutex<Timeline>>,
     clock: Arc<dyn Clock>,
@@ -268,9 +386,35 @@ impl TrackWriter {
         }
         if let Err(e) = self.wav.write(&self.out) {
             self.fail(e);
+            self.out.clear();
+            return;
+        }
+        self.env.push(&self.out);
+        if let Some(f) = self.flac.as_mut() {
+            if f.write(&self.out).is_err() {
+                self.flac = None; // le FLAC sera refait depuis le WAV à la finalisation
+            }
+        }
+        if let Some((m, idx)) = &self.mixer {
+            m.lock().unwrap().push(*idx, &self.out);
         }
         self.out.clear();
         self.shared.frames.store(self.wav.frames(), Ordering::Relaxed);
+        self.update_gain();
+    }
+
+    /// Toutes les 5 s, recalcule le gain qui amène la parole de cette piste à
+    /// niveau égal dans le mélange d'écoute (dès 2 s de parole entendue).
+    fn update_gain(&mut self) {
+        let n = self.env.frames.len();
+        if n < self.next_gain_at {
+            return;
+        }
+        self.next_gain_at = n + 5 * ENV_FPS as usize;
+        let a = audio::activity(&self.env.frames);
+        if a.speech_ratio * n as f32 >= 2.0 * ENV_FPS as f32 {
+            self.shared.gain_target.store((audio::speech_gain_db(&a) * 1000.0) as i32, Ordering::Relaxed);
+        }
     }
 
     fn fail(&mut self, e: io::Error) {
@@ -304,13 +448,14 @@ impl TrackWriter {
                 self.rs = Some(rs);
             }
             None => {
-                let n = (secs * STORE_RATE as f64).round() as u64;
-                if !self.failed {
-                    if let Err(e) = self.wav.write_silence(n) {
-                        self.fail(e);
-                    }
+                self.write_out();
+                let mut left = (secs * STORE_RATE as f64).round() as u64;
+                while left > 0 && !self.failed {
+                    let k = left.min(STORE_RATE as u64) as usize;
+                    self.out.resize(k, 0.0);
+                    self.write_out();
+                    left -= k as u64;
                 }
-                self.shared.frames.store(self.wav.frames(), Ordering::Relaxed);
             }
         }
         self.write_out();
@@ -378,7 +523,7 @@ impl TrackWriter {
         }
     }
 
-    fn run(mut self, rx: Receiver<SourceMsg>, end: Arc<Mutex<Option<f64>>>) -> io::Result<u64> {
+    fn run(mut self, rx: Receiver<SourceMsg>, end: Arc<Mutex<Option<f64>>>) -> io::Result<TrackResult> {
         loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(SourceMsg::Audio { samples, rate, at }) => self.on_audio(samples, rate, at),
@@ -408,8 +553,37 @@ impl TrackWriter {
             }
         }
         let frames = self.wav.finish()?;
-        Ok(frames)
+        let flac_frames = self.flac.take().and_then(|f| f.finish().ok());
+        Ok(TrackResult { frames, env: self.env.finish(), flac_ok: flac_frames == Some(frames) })
     }
+}
+
+struct TrackResult {
+    frames: u64,
+    env: Vec<u8>,
+    flac_ok: bool,
+}
+
+/// Ce qui a été produit pendant l'enregistrement, pour une finalisation immédiate.
+#[derive(Debug, Clone)]
+pub struct Streamed {
+    pub tracks: Vec<StreamedTrack>,
+    /// Durée de la piste d'écoute écrite en direct, si elle est complète.
+    pub mix_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamedTrack {
+    pub role: Role,
+    pub env: Vec<u8>,
+    pub frames: u64,
+    pub flac_ok: bool,
+}
+
+#[derive(Debug)]
+pub struct Stopped {
+    pub duration: f64,
+    pub streamed: Streamed,
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +593,7 @@ struct Track {
     shared: Arc<TrackShared>,
     stop: Arc<AtomicBool>,
     source: Option<JoinHandle<()>>,
-    writer: Option<JoinHandle<io::Result<u64>>>,
+    writer: Option<JoinHandle<io::Result<TrackResult>>>,
 }
 
 pub struct Recorder {
@@ -428,6 +602,7 @@ pub struct Recorder {
     timeline: Arc<Mutex<Timeline>>,
     end: Arc<Mutex<Option<f64>>>,
     tracks: Vec<Track>,
+    mixer: Option<Arc<Mutex<Mixer>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -448,6 +623,10 @@ pub struct LiveStatus {
 
 pub fn wav_path(dir: &Path, role: Role) -> PathBuf {
     dir.join(format!("{}.wav", role.stem()))
+}
+
+pub fn flac_name(role: Role) -> String {
+    format!("{}.flac", role.stem())
 }
 
 impl Recorder {
@@ -473,8 +652,11 @@ impl Recorder {
             }
             Err(e)
         };
-        for (role, src) in sources {
-            let shared = Arc::new(TrackShared::new(role));
+        let shareds: Vec<Arc<TrackShared>> = sources.iter().map(|(role, _)| Arc::new(TrackShared::new(*role))).collect();
+        // Sans mélange en direct (création impossible), la finalisation le refera.
+        let mixer = Mixer::new(dir, shareds.iter().map(|s| s.gain_target.clone()).collect()).ok().map(|m| Arc::new(Mutex::new(m)));
+        for (idx, (role, src)) in sources.into_iter().enumerate() {
+            let shared = shareds[idx].clone();
             let wav = match WavWriter::create(&wav_path(dir, role), STORE_RATE) {
                 Ok(w) => w,
                 Err(e) => return abort(tracks, &end, e),
@@ -485,6 +667,10 @@ impl Recorder {
             let writer = TrackWriter {
                 shared: shared.clone(),
                 wav,
+                flac: FlacWriter::create(&dir.join(flac_name(role)), STORE_RATE).ok(),
+                env: EnvelopeBuilder::new(STORE_RATE),
+                mixer: mixer.clone().map(|m| (m, idx)),
+                next_gain_at: 3 * ENV_FPS as usize,
                 rs: None,
                 timeline: timeline.clone(),
                 clock: clock.clone(),
@@ -515,7 +701,7 @@ impl Recorder {
             };
             tracks.push(Track { shared, stop, source: Some(sh), writer: Some(wh) });
         }
-        Ok(Recorder { dir: dir.to_path_buf(), clock, timeline, end, tracks })
+        Ok(Recorder { dir: dir.to_path_buf(), clock, timeline, end, tracks, mixer })
     }
 
     pub fn roles(&self) -> Vec<Role> {
@@ -560,28 +746,36 @@ impl Recorder {
     }
 
     /// Arrête les sources, vide les tampons, aligne les pistes sur la même durée.
-    pub fn stop(mut self) -> io::Result<f64> {
+    pub fn stop(mut self) -> io::Result<Stopped> {
         let end = self.elapsed();
         *self.end.lock().unwrap() = Some(end);
         for t in &self.tracks {
             t.stop.store(true, Ordering::SeqCst);
         }
         let mut first_err = None;
+        let mut done = vec![];
         for t in &mut self.tracks {
             if let Some(h) = t.source.take() {
                 let _ = h.join();
             }
             if let Some(h) = t.writer.take() {
                 match h.join() {
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(r)) => done.push(StreamedTrack { role: t.shared.role, env: r.env, frames: r.frames, flac_ok: r.flac_ok }),
                     Ok(Err(e)) => first_err = first_err.or(Some(e)),
                     Err(_) => first_err = first_err.or(Some(io::Error::other("fil d'écriture interrompu"))),
                 }
             }
         }
+        // Les fils d'écriture sont terminés : le mélange peut être fermé.
+        let mix_seconds = self
+            .mixer
+            .take()
+            .and_then(|m| Arc::try_unwrap(m).ok())
+            .and_then(|m| m.into_inner().ok())
+            .and_then(|m| m.finish());
         match first_err {
             Some(e) => Err(e),
-            None => Ok(end),
+            None => Ok(Stopped { duration: end, streamed: Streamed { tracks: done, mix_seconds } }),
         }
     }
 }
@@ -606,6 +800,74 @@ pub struct Finalized {
     pub playback: String,
     pub envelopes: Vec<(Role, Vec<u8>)>,
     pub recovered: bool,
+    /// Fin du dernier son utile (secondes) : au-delà, toutes les pistes se taisent.
+    pub active_end: f64,
+}
+
+/// Dernier instant où une piste au moins porte du son (parole, vidéo…), d'après
+/// les enveloppes : il faut au moins 0,3 s de son dans la seconde qui précède.
+pub fn active_end(envelopes: &[(Role, Vec<u8>)]) -> f64 {
+    let n = envelopes.iter().map(|e| e.1.len()).max().unwrap_or(0);
+    let mut act = vec![false; n];
+    for (_, env) in envelopes {
+        let thr = audio::speech_threshold(audio::activity(env).floor_db);
+        for (a, &q) in act.iter_mut().zip(env) {
+            *a |= audio::env_db(q) >= thr;
+        }
+    }
+    let win = ENV_FPS as usize;
+    let mut count = act.iter().rev().take(win).filter(|a| **a).count();
+    let mut i = n;
+    while i > 0 {
+        if count >= 15 {
+            // Dernier instant sonore de cette seconde.
+            let last = (0..i).rev().find(|&k| act[k]).unwrap_or(0);
+            return (last + 1) as f64 / ENV_FPS as f64;
+        }
+        i -= 1;
+        if act[i] {
+            count -= 1;
+        }
+        if i >= win && act[i - win] {
+            count += 1;
+        }
+    }
+    0.0
+}
+
+/// Finalisation immédiate : tout a été produit pendant l'enregistrement, il
+/// ne reste qu'à vérifier les fichiers. `None` si une vérification échoue.
+fn finalize_streamed(dir: &Path, s: &Streamed) -> Option<Finalized> {
+    let mut infos = vec![];
+    let mut envelopes = vec![];
+    let mut frames_max = 0u64;
+    if s.tracks.is_empty() {
+        return None;
+    }
+    for t in &s.tracks {
+        let name = flac_name(t.role);
+        let info = audio::media_info(&dir.join(&name)).ok()?;
+        let flac_frames = (info.duration? * STORE_RATE as f64).round() as u64;
+        let wav_frames = WavReader::open(&wav_path(dir, t.role)).ok()?.frames;
+        if !t.flac_ok || flac_frames.abs_diff(t.frames) > 1 || wav_frames != t.frames {
+            return None;
+        }
+        frames_max = frames_max.max(t.frames);
+        let act = audio::activity(&t.env);
+        infos.push(TrackInfo { role: t.role, file: name, activity: act, gain_db: audio::speech_gain_db(&act) });
+        envelopes.push((t.role, t.env.clone()));
+    }
+    let duration = frames_max as f64 / STORE_RATE as f64;
+    let mix = audio::media_info(&playback_path(dir)).ok()?;
+    if (s.mix_seconds? - duration).abs() > 0.1 || (mix.duration? - duration).abs() > 0.1 || mix.rate != Some(UPLOAD_RATE) {
+        return None;
+    }
+    let echo = match (envelopes.iter().find(|e| e.0 == Role::Mic), envelopes.iter().find(|e| e.0 == Role::Pc)) {
+        (Some(m), Some(p)) => audio::echo_coupling(&m.1, &p.1),
+        _ => None,
+    };
+    let active_end = active_end(&envelopes);
+    Some(Finalized { duration, tracks: infos, echo, playback: "ecoute.flac".into(), envelopes, recovered: false, active_end })
 }
 
 /// Mélange de deux pistes : gains de parole, puis limiteur doux.
@@ -620,7 +882,16 @@ pub fn mix_sample(a: f32, b: f32) -> f32 {
 
 /// Convertit les pistes WAV d'un dossier en FLAC. Sert aussi après un plantage
 /// (`recover` = true : les en-têtes sont d'abord réparés).
-pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, mut progress: P) -> io::Result<Finalized> {
+pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, progress: P) -> io::Result<Finalized> {
+    finalize_with(dir, roles, recover, None, progress)
+}
+
+/// Comme `finalize`, en profitant de ce que l'enregistreur a déjà produit.
+pub fn finalize_with<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, streamed: Option<&Streamed>, mut progress: P) -> io::Result<Finalized> {
+    if let Some(f) = streamed.filter(|_| !recover).and_then(|s| finalize_streamed(dir, s)) {
+        progress(1.0);
+        return Ok(f);
+    }
     let mut infos = vec![];
     let mut envelopes = vec![];
     let mut frames_max = 0u64;
@@ -635,7 +906,7 @@ pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, mut pr
             audio::repair_wav(&wav)?;
         }
         let mut r = WavReader::open(&wav)?;
-        let flac_name = format!("{}.flac", role.stem());
+        let flac_name = flac_name(role);
         let mut w = FlacWriter::create(&dir.join(&flac_name), r.rate)?;
         let mut env = EnvelopeBuilder::new(r.rate);
         let total = r.frames.max(1);
@@ -665,8 +936,10 @@ pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, mut pr
         _ => None,
     };
 
-    // Piste d'écoute : les deux sources mélangées à niveau égal.
+    // Piste d'écoute : les deux sources mélangées à niveau égal, en 16 kHz
+    // (suffisant pour réécouter, et directement envoyable à la transcription).
     let playback = if infos.len() == 1 {
+        let _ = std::fs::remove_file(playback_path(dir)); // mélange en direct incomplet
         infos[0].file.clone()
     } else {
         let name = "ecoute.flac".to_string();
@@ -674,8 +947,9 @@ pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, mut pr
             .iter()
             .map(|t| Ok((WavReader::open(&wav_path(dir, t.role))?, audio::db_to_gain(t.gain_db))))
             .collect::<io::Result<_>>()?;
-        let mut w = FlacWriter::create(&dir.join(&name), STORE_RATE)?;
-        let (mut a, mut b, mut mix) = (vec![], vec![], vec![]);
+        let mut w = FlacWriter::create(&dir.join(&name), UPLOAD_RATE)?;
+        let mut rs = Resampler::new(STORE_RATE, UPLOAD_RATE);
+        let (mut a, mut b, mut mix, mut out) = (vec![], vec![], vec![], vec![]);
         let mut done = 0u64;
         loop {
             a.clear();
@@ -689,10 +963,15 @@ pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, mut pr
             let (ga, gb) = (readers[0].1, readers[1].1);
             mix.clear();
             mix.extend((0..n).map(|i| mix_sample(a.get(i).copied().unwrap_or(0.0) * ga, b.get(i).copied().unwrap_or(0.0) * gb)));
-            w.write(&mix)?;
+            out.clear();
+            rs.push(&mix, &mut out);
+            w.write(&out)?;
             done += n as u64;
             progress((total_steps - 1.0 + done as f32 / frames_max.max(1) as f32) / total_steps);
         }
+        out.clear();
+        rs.finish(&mut out);
+        w.write(&out)?;
         w.finish()?;
         name
     };
@@ -709,6 +988,7 @@ pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, mut pr
     // Les WAV ne sont supprimés qu'une fois la conversation enregistrée comme
     // prête (voir `remove_wavs`) : un plantage entre-temps ne perd rien.
     progress(1.0);
+    let active_end = active_end(&envelopes);
     Ok(Finalized {
         duration: frames_max as f64 / STORE_RATE as f64,
         tracks: infos,
@@ -716,6 +996,7 @@ pub fn finalize<P: FnMut(f32)>(dir: &Path, roles: &[Role], recover: bool, mut pr
         playback,
         envelopes,
         recovered: recover,
+        active_end,
     })
 }
 
@@ -902,7 +1183,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(400));
         let live = rec.live();
         assert!(live.tracks.iter().all(|t| t.error.is_none()));
-        let end = rec.stop().unwrap();
+        let stopped = rec.stop().unwrap();
+        let end = stopped.duration;
         assert!((end - 7.0).abs() < 0.05, "durée hors pause : {end}");
 
         let mic = read_all(&wav_path(&dir, Role::Mic));
@@ -962,6 +1244,19 @@ mod tests {
         assert!(f.echo.is_none() || f.echo.unwrap() < 0.4, "{:?}", f.echo);
         let info = audio::media_info(&dir.join("ecoute.flac")).unwrap();
         assert!((info.duration.unwrap() - 20.0).abs() < 0.01);
+        assert_eq!(info.rate, Some(UPLOAD_RATE), "piste d'écoute en 16 kHz");
+        assert!((f.active_end - 20.0).abs() < 0.1, "{}", f.active_end);
+    }
+
+    #[test]
+    fn fin_du_dernier_son() {
+        let q = |db: f32, n: usize| vec![audio::quantize_db(db); n];
+        // Micro : bruit de fond partout, parole de 10 à 70 s. PC : parole de 40 à 100 s, puis silence numérique.
+        let mic = [q(-60.0, 500), q(-25.0, 3000), q(-60.0, 26_500)].concat();
+        let pc = [q(-90.0, 2000), q(-20.0, 3000), q(-90.0, 25_000)].concat();
+        let end = active_end(&[(Role::Mic, mic), (Role::Pc, pc)]);
+        assert!((end - 100.0).abs() < 0.05, "{end}");
+        assert_eq!(active_end(&[(Role::Pc, q(-90.0, 500))]), 0.0);
     }
 
     #[test]
@@ -994,11 +1289,52 @@ mod tests {
         assert_eq!(live.tracks.len(), 2);
         assert!(live.tracks.iter().all(|t| t.status.state == SourceState::Active), "{live:?}");
         assert!(live.tracks.iter().any(|t| t.status.device.as_deref() == Some("Autre micro")));
-        let end = rec.stop().unwrap();
+        let stopped = rec.stop().unwrap();
+        let end = stopped.duration;
+        // Tout a été produit pendant l'enregistrement : FLAC, enveloppes, écoute.
+        assert!(stopped.streamed.tracks.iter().all(|t| t.flac_ok), "FLAC en direct complets");
+        assert!((stopped.streamed.mix_seconds.unwrap() - end).abs() < 0.1);
+        let t0 = Instant::now();
+        let fast = finalize_streamed(&dir, &stopped.streamed).expect("finalisation immédiate");
+        assert!(t0.elapsed() < Duration::from_millis(300), "finalisation immédiate : {:?}", t0.elapsed());
+        assert_eq!(fast.playback, "ecoute.flac");
+        // Le mélange en direct contient bien les deux voix, en 16 kHz.
+        let mut mix = vec![];
+        audio::decode_mono(&dir.join("ecoute.flac"), UPLOAD_RATE, |b| {
+            mix.extend_from_slice(b);
+            true
+        })
+        .unwrap();
+        assert!((mix.len() as f64 / UPLOAD_RATE as f64 - end).abs() < 0.1);
+        let at = |a: f64, b: f64| rms(&mix[(a * UPLOAD_RATE as f64) as usize..(b * UPLOAD_RATE as f64) as usize]);
+        assert!(at(0.2, 0.8) > 0.02 && at(1.2, 1.8) > 0.02, "micro puis PC audibles : {} {}", at(0.2, 0.8), at(1.2, 1.8));
+        // Même résultat que la finalisation complète depuis les WAV.
         let f = finalize(&dir, &[Role::Mic, Role::Pc], false, |_| {}).unwrap();
         assert!((f.duration - end).abs() < 0.1, "{} vs {}", f.duration, end);
+        assert!((fast.duration - f.duration).abs() < 1e-6);
+        for (a, b) in fast.tracks.iter().zip(&f.tracks) {
+            assert!(a.role == b.role && a.file == b.file && (a.gain_db - b.gain_db).abs() < 0.5 && (a.activity.speech_ratio - b.activity.speech_ratio).abs() < 0.02, "{a:?} / {b:?}");
+        }
+        // Enveloppes identiques, à l'arrondi du WAV 16 bits près.
+        for (a, b) in fast.envelopes.iter().zip(&f.envelopes) {
+            assert!(a.0 == b.0 && a.1.len() == b.1.len() && a.1.iter().zip(&b.1).all(|(x, y)| x.abs_diff(*y) <= 1));
+        }
         for t in &f.tracks {
             assert!(t.activity.speech_ratio > 0.3 && t.activity.speech_ratio < 0.7, "{t:?}");
         }
+    }
+
+    /// Une seule source : la piste d'écoute est quand même écrite en direct.
+    #[test]
+    fn une_seule_source_en_direct() {
+        let dir = tmpdir("solo");
+        let clock = Arc::new(SystemClock::new());
+        let mic = SynthSource { clock: clock.clone(), device: "Micro".into(), rate: 48_000, amp: 0.3, seed: 3, script: |_| true, silent_gaps: false, switch_after: None };
+        let rec = Recorder::start(&dir, clock.clone(), vec![(Role::Mic, Box::new(mic))]).unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+        let stopped = rec.stop().unwrap();
+        let f = finalize_with(&dir, &[Role::Mic], false, Some(&stopped.streamed), |_| {}).unwrap();
+        assert_eq!((f.playback.as_str(), f.tracks.len()), ("ecoute.flac", 1));
+        assert!((audio::media_info(&dir.join("ecoute.flac")).unwrap().duration.unwrap() - stopped.duration).abs() < 0.1);
     }
 }

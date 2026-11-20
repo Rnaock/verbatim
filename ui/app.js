@@ -96,6 +96,14 @@ const rates = settings => {
 async function refreshState() {
   const st = await invoke('app_state');
   applyTheme(st.settings.theme);
+  // Premier lancement : décidé une fois, pour que l'accueil reste affiché
+  // pendant qu'on y saisit la clé.
+  if (!S.ready) {
+    const hasKey = st.key && st.key.has_key;
+    set({ onboarding: !st.settings.onboarded && !hasKey });
+    // Déjà utilisateur (clé présente) : l'accueil ne sera jamais proposé.
+    if (hasKey && !st.settings.onboarded) invoke('settings_set', { patch: { onboarded: true } }).catch(() => {});
+  }
   set({ ready: true, version: st.version, key: st.key, settings: st.settings, library: st.library, windows: st.windows, simulated: st.simulated_audio, updates: st.updates, repo: st.repo, recording: st.recording ? { id: st.recording } : null });
   return st;
 }
@@ -339,11 +347,14 @@ function RecBar() {
   if (!recording) return null;
   const paused = live && live.paused;
   const saveTitle = () => { if (title.trim() && item) invoke('item_rename', { id: item.id, title }).catch(() => {}); };
-  return html`<div class=${'recbar' + (paused ? ' paused' : '')}>
+  // Plus aucun son depuis 2 minutes : l'appel est sans doute fini.
+  const quiet = live && !paused && live.quiet >= 120 ? live.quiet : 0;
+  return html`<div class=${'recbar' + (paused ? ' paused' : '') + (quiet ? ' forgot' : '')}>
     <span class="recdot"></span>
     <span class="rectime">${clock(live ? live.elapsed : 0)}</span>
     ${item && item.event ? html`<span class="linked" title="Rendez-vous lié : titre et participants servent à nommer les voix">${I.cal}${item.event}<button aria-label="Délier" title="Ne pas lier à ce rendez-vous" onClick=${() => invoke('item_link_event', { id: item.id, event: null }).catch(e => toast(errMsg(e)))}>×</button></span>` : null}
     ${(live ? live.tracks : []).map(t => html`<${Meter} t=${t} elapsed=${live.elapsed} recId=${recording.id} />`)}
+    ${quiet ? html`<span class="forgotmsg" role="status">Aucun son depuis ${Math.floor(quiet / 60)} min. Appel terminé ? <${Tip} text="Si tu arrêtes maintenant, la fin silencieuse ne sera pas envoyée à la transcription : tu ne la paies pas." /></span>` : null}
     <span class="grow"></span>
     <input class="rectitle" placeholder="Nom de la conversation (facultatif)" value=${title} onInput=${e => setTitle(e.target.value)} onBlur=${saveTitle} onKeyDown=${e => e.key === 'Enter' && e.target.blur()} />
     <button class="btn" onClick=${() => invoke('rec_pause', { paused: !paused }).catch(e => toast(errMsg(e)))}>${paused ? 'Reprendre' : 'Pause'}</button>
@@ -412,7 +423,7 @@ function KeySetup({ compact }) {
     <div class="row"><input class="inp mono" type="password" placeholder="sk_…" value=${val} onInput=${e => setVal(e.target.value)} onKeyDown=${e => e.key === 'Enter' && save()} />
       <button class="btn primary" onClick=${save}>Enregistrer</button></div>
     <label class="check"><input type="checkbox" checked=${remember} onChange=${e => setRemember(e.target.checked)} /><span><b>Retenir la clé</b></span></label>
-    <span class="muted" style="font-size:12.5px">À créer sur <button class="linkbtn" onClick=${() => openUrl('https://elevenlabs.io/app/developers/api-keys')}>elevenlabs.io → Developers → API Keys</button>, avec la permission Speech to Text (et User → Read pour voir le solde).</span>
+    <span class="muted" style="font-size:12.5px">À créer sur <button class="linkbtn" onClick=${() => openUrl('https://elevenlabs.io/app/developers/api-keys')}>elevenlabs.io → Developers → API Keys</button>, puis <b>Create Key</b> : active <b>Restrict Key</b>, autorise <b>Speech to Text</b> et mets <b>User</b> sur <b>Read</b> (pour voir le solde).</span>
   </div>`;
 }
 
@@ -450,6 +461,89 @@ function NowPill() {
       ${cal.now.map(x => html`<${EventCard} e=${x} />`)}
     <//>
   </span>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Premier lancement                                                   */
+/* ------------------------------------------------------------------ */
+const LANGS = [['fr', 'Français'], ['en', 'Anglais'], ['es', 'Espagnol'], ['de', 'Allemand'], ['it', 'Italien'], ['auto', 'Détection automatique']];
+
+// Quatre réglages, tous modifiables ensuite. Rien n'est obligatoire.
+function Onboarding() {
+  const settings = useStore(s => s.settings);
+  const key = useStore(s => s.key);
+  const balance = useStore(s => s.balance);
+  const balanceError = useStore(s => s.balanceError);
+  const calState = useStore(s => s.calState);
+  const [name, setName] = useState(settings.my_name === 'Moi' ? '' : settings.my_name);
+  const [lang, setLang] = useState(settings.lang);
+  const [k, setK] = useState('');
+  const [cal, setCal] = useState('');
+  const [busy, setBusy] = useState('');
+  useEffect(() => { invoke('calendar_state').then(c => set({ calState: c })).catch(() => {}); }, []);
+  const hasKey = key && key.has_key;
+  const saveKey = async () => {
+    if (!k.trim()) return true;
+    setBusy('key');
+    try { set({ key: await invoke('key_set', { key: k.trim(), remember: true }) }); setK(''); await fetchBalance(); return true; }
+    catch (e) { toast('Clé refusée : ' + errMsg(e)); return false; }
+    finally { setBusy(''); }
+  };
+  const saveCal = async () => {
+    if (!cal.trim()) return true;
+    setBusy('cal');
+    try { set({ calState: await invoke('calendar_set', { url: cal }) }); setCal(''); refreshCalendar(true); return true; }
+    catch (e) { toast('Agenda non connecté : ' + errMsg(e)); return false; }
+    finally { setBusy(''); }
+  };
+  const finish = async () => {
+    if (!(await saveKey()) || !(await saveCal())) return;
+    await saveSettings({ my_name: name.trim() || 'Moi', lang, onboarded: true });
+  };
+  return html`<main class="main"><div class="page onb">
+    <div class="hero">Bienvenue dans Verbatim</div>
+    <p class="muted">Quatre réglages et c’est prêt. Rien n’est obligatoire, et tout se change ensuite dans les réglages.</p>
+
+    <div class="card onb-step"><div class="onb-n">1</div><div class="stack">
+      <b>Ton prénom</b>
+      <input class="inp" style="max-width:280px" placeholder="Ton prénom" value=${name} onInput=${e => setName(e.target.value)} />
+      <small class="muted">Il sera donné à ta voix dans les transcriptions.</small>
+    </div></div>
+
+    <div class="card onb-step"><div class="onb-n">2</div><div class="stack">
+      <b>Ta clé ElevenLabs</b>
+      <small class="muted">Verbatim transcrit avec ElevenLabs : environ 0,20 € par heure d’audio, à payer sur ton compte ElevenLabs.</small>
+      ${hasKey ? html`<div class="row onb-ok">✓ Clé enregistrée <code class="mono">${key.masked}</code>
+          ${balance ? html`<span class="muted">· formule ${balance.tier} · ${num(balance.left)} crédits</span>` : balanceError ? html`<span class="muted">· ${balanceError}</span>` : null}
+          <button class="linkbtn quiet" onClick=${async () => set({ key: await invoke('key_clear'), balance: null })}>changer</button></div>`
+      : html`<ol class="onb-how">
+          <li><button class="linkbtn" onClick=${() => openUrl('https://elevenlabs.io/app/developers/api-keys')}>Ouvre la page des clés ElevenLabs</button> (crée un compte si besoin), puis <b>Create Key</b>.</li>
+          <li>Nom : <code>Verbatim</code>. Active <b>Restrict Key</b>.</li>
+          <li>Autorisations : active <b>Speech to Text</b>, et mets <b>User</b> sur <b>Read</b> (pour voir ton solde). Laisse tout le reste désactivé.</li>
+          <li>Crée la clé, copie-la (elle ne s’affiche qu’une fois) et colle-la ici.</li>
+        </ol>
+        <div class="row"><input class="inp mono grow" type="password" placeholder="sk_…" value=${k} onInput=${e => setK(e.target.value)} onKeyDown=${e => e.key === 'Enter' && saveKey()} />
+          <button class="btn" disabled=${!k.trim() || busy === 'key'} onClick=${saveKey}>${busy === 'key' ? 'Vérification…' : 'Enregistrer'}</button></div>
+        <small class="muted">Elle reste sur ce PC, chiffrée par ta session Windows.</small>`}
+    </div></div>
+
+    <div class="card onb-step"><div class="onb-n">3</div><div class="stack">
+      <b>Ton agenda <span class="muted" style="font-weight:400">(facultatif)</span></b>
+      <small class="muted">Verbatim repère le rendez-vous en cours : titre, participants et lien de visio, pour enregistrer un appel en un clic.</small>
+      ${calState && calState.connected ? html`<div class="row onb-ok">✓ Agenda connecté${calState.account ? html` : <b>${calState.account}</b>` : ''}</div>`
+      : html`<small class="muted">Google Agenda → ⚙ Paramètres → ton agenda (colonne de gauche) → « Intégrer l’agenda » → copie l’<b>adresse secrète au format iCal</b>.</small>
+        <div class="row"><input class="inp grow" type="password" placeholder="https://calendar.google.com/calendar/ical/…/basic.ics" value=${cal} onInput=${e => setCal(e.target.value)} />
+          <button class="btn" disabled=${!cal.trim() || busy === 'cal'} onClick=${saveCal}>${busy === 'cal' ? 'Vérification…' : 'Connecter'}</button></div>`}
+    </div></div>
+
+    <div class="card onb-step"><div class="onb-n">4</div><div class="stack">
+      <b>Langue de tes conversations</b>
+      <select class="inp" style="max-width:280px" value=${lang} onChange=${e => setLang(e.target.value)}>${LANGS.map(([v, t]) => html`<option value=${v}>${t}</option>`)}</select>
+    </div></div>
+
+    <div class="row" style="margin-top:6px"><button class="btn primary big-cta" disabled=${!!busy} onClick=${finish}>Commencer</button>
+      ${!hasKey && !k.trim() ? html`<small class="muted">Sans clé, tu peux déjà enregistrer. La transcription attendra la clé.</small>` : null}</div>
+  </div></main>`;
 }
 
 function Welcome() {
@@ -783,7 +877,7 @@ function TranscriptView({ detail, time, onSeek, reload }) {
     </div>
     ${t.notes.map(n => html`<${Note} kind="info">${n}<//>`)}
     <${CostLow} item=${detail.item} />
-    <div>${turns.map(tr => html`<div class=${'turn' + (now && tr.segs.includes(now) ? ' now' : '')}>
+    <div>${turns.map(tr => html`<div class=${'turn' + (now && tr.segs.includes(now) ? ' now' : '') + (tr.segs.length === 1 && tr.segs[0].text.split(/\s+/).length <= 3 ? ' brief' : '')}>
       <button class="ts" onClick=${() => onSeek(tr.start)}>${clock(tr.start)}</button>
       <div>
         <span class="who" style=${'color:' + colorOf(tr.speaker)}>${nameOf(tr.speaker)}</span>
@@ -1198,6 +1292,8 @@ function App() {
   const dragging = useStore(s => s.dragging);
   const toastMsg = useStore(s => s.toast);
   const failed = useStore(s => s.failed);
+  // Premier lancement : ni clé ni accueil déjà vu, et rien en cours.
+  const onboarding = useStore(s => s.ready && s.onboarding && !s.settings.onboarded && !s.recording);
   if (failed) return html`<div class="page"><${Note} kind="err">Verbatim n’a pas pu démarrer : ${failed}<//></div>`;
   if (!ready) return null;
   return html`<div class=${'shell' + (dragging ? ' dragging' : '')}>
@@ -1205,10 +1301,10 @@ function App() {
     <${Top} />
     <${UpdateBar} />
     <${RecBar} />
-    <div class="body">
+    ${onboarding ? html`<div class="body solo"><${Onboarding} /></div>` : html`<div class="body">
       <${Side} />
       <main class="main">${selected ? html`<${Detail} id=${selected} key=${selected} />` : html`<${Welcome} />`}</main>
-    </div>
+    </div>`}
     <${Drawer} />
     <div class="dropveil">Dépose pour importer</div>
     ${toastMsg ? html`<div class="toast" role="status">${toastMsg}</div>` : null}
@@ -1257,7 +1353,7 @@ async function boot() {
     listen('item-removed', id => set(s => { const items = { ...s.items }; delete items[id]; return { items, selected: s.selected === id ? null : s.selected }; })),
     listen('job', ({ id, job }) => { set(s => s.items[id] ? { items: { ...s.items, [id]: { ...s.items[id], job } } } : {}); if (!job || job.state === 'error') setTimeout(fetchBalance, 2500); }),
     listen('progress', p => set(s => ({ progress: { ...s.progress, [p.id]: p } }))),
-    listen('rec-live', ({ id, live }) => set(s => ({ live, recording: s.recording && s.recording.id === id ? s.recording : { id } }))),
+    listen('rec-live', ({ id, live, quiet }) => set(s => ({ live: { ...live, quiet: quiet || 0 }, recording: s.recording && s.recording.id === id ? s.recording : { id } }))),
     listen('rec-error', ({ message }) => { toast('Enregistrement arrêté : ' + message); set({ recording: null, live: null }); }),
     listen('library-reset', () => loadLibrary()),
     listen('settings-changed', () => refreshState()),

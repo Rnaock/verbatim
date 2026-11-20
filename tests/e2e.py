@@ -24,8 +24,10 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import JavascriptException, StaleElementReferenceException
 
-SC = os.path.dirname(os.path.abspath(__file__))
-APP = os.path.join(SC, "v4", "target", "debug", "Verbatim")
+# Build de développement (`cargo build`) et dossier des captures d'écran.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+APP = os.environ.get("VERBATIM_APP") or os.path.join(REPO, "target", "debug", "Verbatim")
+SC = os.environ.get("VERBATIM_E2E_OUT") or tempfile.mkdtemp(prefix="vb4e2e-out-")
 TMP = tempfile.mkdtemp(prefix="vb4e2e-")
 HOME = os.path.join(TMP, "home")
 LIB = os.path.join(HOME, "Documents", "Verbatim")
@@ -239,12 +241,10 @@ try:
     check("enregistrement interrompu récupéré et finalisé", rec["recovered"] and abs(rec["duration"] - 6.0) < 0.05, rec)
     check("WAV convertis en FLAC", os.path.exists(os.path.join(crash, "micro.flac")) and not os.path.exists(os.path.join(crash, "micro.wav")))
     time.sleep(1)
-    if "Enregistre ou importe" not in text(".hero"):
+    if "Bienvenue" not in text(".hero"):
         print("HTML :", js("return document.getElementById('app').innerHTML.slice(0, 1500)"))
         print("ERREURS :", js("return window.__errs || []"))
         shot("v4_debug.png")
-    check("accueil affiché", "Enregistre ou importe" in text(".hero"))
-    shot("v4_welcome.png")
 
     print("=== Sécurité de la page ===")
     r = aw("const done=arguments[arguments.length-1]; fetch('http://127.0.0.1:9914/v1/user/subscription').then(()=>done('joint'),()=>done('bloqué'));")
@@ -256,14 +256,26 @@ try:
     r = inv("open_url", "{url:'https://evil.example/'}")
     check("liens limités à elevenlabs.io", "err" in r, r)
 
-    print("=== Clé ===")
-    q(".card input[type=password]")[0].send_keys(GOOD_KEY)
-    next(b for b in q(".card button") if b.text == "Enregistrer").click()
+    print("=== Premier lancement ===")
+    onb = text(".onb")
+    check("accueil du premier lancement : quatre réglages", "Bienvenue" in text(".hero") and len(q(".onb-step")) == 4, onb[:200])
+    check("mode d'emploi de la clé (options à choisir)", all(x in onb for x in ["Create Key", "Restrict Key", "Speech to Text", "User", "Read"]), onb)
+    shot("v44_onboarding.png")
+    q(".onb-step input")[0].send_keys("Alex")
+    q(".onb input[placeholder^=sk_]")[0].send_keys(GOOD_KEY)
+    next(b for b in q(".onb button") if b.text == "Enregistrer").click()
     W().until(lambda _: state()["key"]["has_key"])
     check("clé enregistrée, masquée", state()["key"]["masked"] == "sk_…abcd")
     check("clé jamais renvoyée à la page", GOOD_KEY not in json.dumps(state()) and GOOD_KEY not in d.page_source)
     W().until(lambda _: state()["balance"] is not None)
     check("solde lu", state()["balance"]["left"] == 90000)
+    W().until(lambda _: "crédits" in text(".onb-ok"))
+    check("clé vérifiée à l'écran : formule et solde", "90" in text(".onb-ok"), text(".onb-ok"))
+    next(b for b in q(".onb button") if b.text == "Commencer").click()
+    W().until(lambda _: "Enregistre ou importe" in text(".hero"))
+    st = state()["settings"]
+    check("prénom et langue retenus, accueil normal ensuite", st["my_name"] == "Alex" and st["onboarded"] and st["lang"] == "fr", st)
+    shot("v4_welcome.png")
 
     print("=== Interface : réglages, explications, version ===")
     gear = js("const p=document.querySelector('.top button[aria-label=Réglages] svg path'); return p && p.getAttribute('d')")
@@ -271,7 +283,7 @@ try:
     q(".top button[aria-label=Réglages]")[0].click()
     W().until(lambda _: q(".drawer"))
     vtxt = js("return document.querySelector('.drawer').textContent")
-    check("section Version avec installation depuis un fichier", "Verbatim 4.3.1" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
+    check("section Version avec installation depuis un fichier", "Verbatim 4.4.0" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
     check("explications au survol dans les réglages", len(q(".drawer .tip[data-tip]")) >= 2)
     check("vocabulaire : +20 % sur toute la transcription", "20 %" in js("return [...document.querySelectorAll('.drawer .tip')].map(t => t.dataset.tip).join(' ')"))
     r = inv("update_install_file", "{path:'/tmp/photo.png'}")
@@ -319,7 +331,7 @@ try:
     mt = text(".modal")
     ctx = js("const p=document.querySelector('.modal .ctx'); return p ? p.textContent : ''")
     check("signalement : capture absente hors Windows, sans blocage", "Pas de capture" in mt, mt[:300])
-    check("signalement : version et journal joints, sans titre de conversation", "Verbatim 4.3.1" in ctx and "Appel" not in ctx and "Claire" not in ctx, ctx[:400])
+    check("signalement : version et journal joints, sans titre de conversation", "Verbatim 4.4.0" in ctx and "Appel" not in ctx and "Claire" not in ctx, ctx[:400])
     check("avertissement « visible par tous »", "visible par tous" in mt)
     q(".modal input")[0].send_keys("Test")
     check("texte copiable une fois le titre saisi", next(b for b in q(".modal button") if b.text == "Copier le texte").is_enabled())
@@ -375,6 +387,12 @@ try:
     check("durée hors pause ≈ 11 s", 10.0 < it["duration"] < 12.5, it["duration"])
     files = os.listdir(folder)
     check("pistes et écoute en FLAC", all(f in files for f in ["micro.flac", "pc.flac", "ecoute.flac", "envelope.json", "transcription.txt"]), files)
+    check("fichiers de travail supprimés", not any(f.endswith(".wav") for f in files), files)
+    flac_rate = lambda p: int.from_bytes(open(p, "rb").read(21)[18:21], "big") >> 4
+    check("piste d'écoute en 16 kHz, pistes d'origine en 24 kHz", flac_rate(os.path.join(folder, "ecoute.flac")) == 16000 and flac_rate(os.path.join(folder, "micro.flac")) == 24000)
+    journal = open(os.path.join(DATA, "journal.txt"), encoding="utf-8").read()
+    m = re.findall(r"pistes en direct true, écoute en direct true\s+\[[^\]]+\] finalisation \S+ \S+ en (\d+\.\d) s", journal)
+    check("finalisation immédiate (tout est produit pendant l'enregistrement)", m and float(m[-1]) < 1.0, journal[-600:])
     calls = [c for c in UP["calls"] if c["file"].startswith("envoi-")]
     names = sorted(set(c["file"] for c in calls))
     check("pistes séparées envoyées (micro et PC)", names == ["envoi-micro.flac", "envoi-pc.flac"], names)
@@ -394,7 +412,7 @@ try:
     check("coût et solde affichés en fin de transcription", "Coût" in cl and "Reste" in cl and "crédits" in cl, cl)
     check("enregistrement lié au rendez-vous en cours", it.get("event") == "Point budget avec Claire", it.get("event"))
     me_chip = [e.text for e in q(".evrow .pchip")]
-    check("ta propre adresse affichée avec ton prénom", any("(toi)" in c and "Moi" in c for c in me_chip), me_chip)
+    check("ta propre adresse affichée avec ton prénom", any("(toi)" in c and "Alex" in c for c in me_chip), me_chip)
     plan = inv("estimate", "{id:'%s', mode:'auto'}" % it["id"])
     check("mode automatique : une seule piste mixée (coût ×1)", plan.get("ok", {}).get("mode") == "mixed" and plan["ok"]["parts"] == [None], plan)
     # Nom d'un participant corrigé : annuaire + voix renommée.
@@ -528,6 +546,22 @@ try:
     next(b for b in q(".sub button") if b.text == "Mettre à la corbeille").click()
     W().until(lambda _: item_by_title("Mémo téléphone") is None)
     check("conversation déplacée dans la corbeille", os.path.isdir(os.path.join(LIB, ".corbeille", memo["id"])))
+    print("=== Mode automatique : la piste d'écoute est envoyée telle quelle ===")
+    inv("settings_set", "{patch:{mode:'auto'}}")
+    js("window.Verbatim.select(null)")
+    W().until(lambda _: q(".bigrec"))
+    n0 = len(UP["calls"])
+    q(".bigrec")[0].click()
+    W().until(lambda _: q(".recbar"))
+    time.sleep(5)
+    t_stop = time.time()
+    next(b for b in q(".recbar button") if "Arrêter" in b.text).click()
+    W(40).until(lambda _: len(UP["calls"]) > n0)
+    delay = time.time() - t_stop
+    sent = UP["calls"][-1]
+    check("envoi de ecoute.flac sans réencodage", sent["file"] == "ecoute.flac" and sent["head"] == b"fLaC", sent["file"])
+    check("transcription partie moins de 3 s après l'arrêt", delay < 3.0, round(delay, 1))
+    W(40).until(lambda _: not any((x.get("job") for x in state()["items"].values())))
     check("aucune clé dans le DOM", GOOD_KEY not in d.page_source)
     shot("v4_final.png")
 except Exception:

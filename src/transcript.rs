@@ -194,11 +194,27 @@ fn attribute(toks: &mut [Token], lv: &Levels) {
 // Segmentation et noms
 // ---------------------------------------------------------------------------
 /// `breaks` : instants où une autre piste commence un mot (triés).
-fn segment(toks: &[Token], next_id: &mut u32, breaks: &[f64]) -> Vec<Segment> {
+/// Début d'un mot d'une autre piste.
+#[derive(Debug, Clone, Copy)]
+struct Break {
+    at: f64,
+    /// Vraie intervention (pas une simple relance « oui », « hm »).
+    big: bool,
+}
+
+/// Blanc maximal entre deux mots d'une même prise de parole.
+const RUN_GAP: f64 = 1.0;
+/// Pause de celui qui parle à partir de laquelle une relance coupe quand même.
+const BACKCHANNEL_PAUSE: f64 = 1.0;
+/// Blanc minimal pour qu'une vraie intervention de l'autre coupe le paragraphe.
+const TURN_PAUSE: f64 = 0.5;
+
+fn segment(toks: &[Token], next_id: &mut u32, breaks: &[Break]) -> Vec<Segment> {
     // Une autre piste a-t-elle pris la parole dans le blanc ]last_end, start[ ?
     let interrupted = |last_end: f64, start: f64| {
-        let i = breaks.partition_point(|&b| b < last_end - 0.05);
-        breaks.get(i).map(|&b| b < start).unwrap_or(false)
+        let i = breaks.partition_point(|b| b.at < last_end - 0.05);
+        let gap = start - last_end;
+        breaks[i..].iter().take_while(|b| b.at < start).any(|b| (b.big && gap >= TURN_PAUSE) || gap >= BACKCHANNEL_PAUSE)
     };
     let mut out: Vec<Segment> = vec![];
     let mut cur: Option<Segment> = None;
@@ -303,10 +319,30 @@ pub fn build(input: Input) -> Transcript {
     // Pistes séparées : un paragraphe est coupé là où l'autre piste prend la
     // parole pendant un blanc, pour que les répliques s'intercalent au bon
     // endroit. Un vrai chevauchement (les deux parlent) ne coupe rien.
-    let starts_of = |resp: &Value| -> Vec<f64> {
-        let mut v: Vec<f64> = tokens(resp, "", None).iter().filter(|t| t.kind == Kind::Word).map(|t| t.start).collect();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        v
+    // Mots de l'autre piste, marqués selon leur prise de parole. Un simple
+    // « oui » ou « hm » (moins de 3 mots et de 1,5 s) est une relance : elle ne
+    // coupe pas le paragraphe de celui qui parle, sauf s'il marquait une pause.
+    // Une vraie intervention coupe dès un court blanc ; pendant un chevauchement
+    // (aucun blanc), rien n'est coupé.
+    let starts_of = |resp: &Value| -> Vec<Break> {
+        let mut words: Vec<(f64, f64)> = tokens(resp, "", None).iter().filter(|t| t.kind == Kind::Word).map(|t| (t.start, t.end)).collect();
+        words.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut runs: Vec<(f64, f64, Vec<f64>)> = vec![];
+        for (s, e) in words {
+            match runs.last_mut() {
+                Some(r) if s - r.1 <= RUN_GAP => {
+                    r.1 = r.1.max(e);
+                    r.2.push(s);
+                }
+                _ => runs.push((s, e, vec![s])),
+            }
+        }
+        runs.into_iter()
+            .flat_map(|(s, e, starts)| {
+                let big = starts.len() >= 3 || e - s >= 1.5;
+                starts.into_iter().map(move |at| Break { at, big })
+            })
+            .collect()
     };
     for (k, (src, resp)) in input.responses.iter().enumerate() {
         if language.is_none() {
@@ -329,7 +365,7 @@ pub fn build(input: Input) -> Transcript {
                     breaks.extend(starts_of(other));
                 }
             }
-            breaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            breaks.sort_by(|a, b| a.at.partial_cmp(&b.at).unwrap_or(std::cmp::Ordering::Equal));
         }
         segments.extend(segment(&toks, &mut next_id, &breaks));
     }
@@ -568,6 +604,24 @@ mod tests {
         assert_eq!(texts, ["Bonjour", "Salut", "ça va ?"]);
         assert_eq!(t.segments[1].source, Some(Role::Pc));
         assert_eq!(t.speakers.len(), 2);
+    }
+
+    /// Une relance (« Oui. ») glissée pendant que l'autre parle sans s'arrêter
+    /// ne hache pas son paragraphe ; une vraie intervention le coupe.
+    #[test]
+    fn relances_ne_coupent_pas_les_paragraphes() {
+        let mic = resp(&[
+            ("speaker_0", 0.0, 0.5, "Donc"), ("speaker_0", 0.5, 1.0, "le"), ("speaker_0", 1.0, 1.5, "budget"),
+            ("speaker_0", 2.0, 2.5, "est"), ("speaker_0", 2.5, 3.0, "validé."),
+            ("speaker_0", 6.0, 6.5, "Parfait."),
+        ]);
+        let pc = resp(&[
+            ("speaker_0", 1.55, 1.9, "Oui."),
+            ("speaker_0", 3.2, 3.6, "Et"), ("speaker_0", 3.6, 4.0, "pour"), ("speaker_0", 4.0, 4.4, "quand"), ("speaker_0", 4.4, 4.9, "exactement ?"),
+        ]);
+        let t = build(input(Mode::Separate, vec![(Some(Role::Mic), &mic), (Some(Role::Pc), &pc)], None));
+        let texts: Vec<&str> = t.segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["Donc le budget est validé.", "Oui.", "Et pour quand exactement ?", "Parfait."]);
     }
 
     /// Pistes séparées : deux personnes au micro, deux côté PC, avec

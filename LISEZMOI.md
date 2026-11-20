@@ -1,4 +1,4 @@
-# Verbatim 4.3.1
+# Verbatim 4.4
 
 Enregistre et transcrit n’importe quelle conversation : ton micro, le son du
 PC (visio, appel, vidéo), ou les deux à la fois. Importe aussi les fichiers de
@@ -7,7 +7,7 @@ ElevenLabs Scribe v2, avec séparation des personnes.
 
 ## Installation
 
-1. **Avant d’extraire le zip** : clic droit sur `Verbatim-4.3.zip` →
+1. **Avant d’extraire le zip** : clic droit sur `Verbatim-4.4.zip` →
    Propriétés → coche **Débloquer** → OK.
 2. Extrais le dossier `Verbatim` où tu veux le garder. Garde les deux fichiers
    ensemble : `Verbatim.exe` a besoin de `WebView2Loader.dll` à côté de lui.
@@ -17,6 +17,16 @@ ElevenLabs Scribe v2, avec séparation des personnes.
 Au premier lancement, Windows peut afficher « Windows a protégé votre
 ordinateur » : **Informations complémentaires** puis **Exécuter quand même**.
 Ça n’arrive qu’une fois.
+
+Verbatim pose ensuite quatre questions, toutes facultatives et modifiables
+dans les réglages : ton prénom, ta clé ElevenLabs, ton agenda, la langue de
+tes conversations.
+
+**Créer la clé ElevenLabs** (elevenlabs.io → Developers → API Keys) :
+**Create Key**, nom `Verbatim`, active **Restrict Key**, autorise **Speech to
+Text** et mets **User** sur **Read** (pour voir ton solde), laisse le reste
+désactivé. La clé ne s’affiche qu’une fois : copie-la et colle-la dans
+Verbatim, qui la garde chiffrée sur ce PC.
 
 **Depuis Verbatim 4.0** : ferme Verbatim, puis remplace l’ancien
 `Verbatim.exe` par le nouveau, dans le même dossier (garde aussi
@@ -102,9 +112,9 @@ une réunion autour d’une table, garde seulement **Micro**.
 
 Pendant l’enregistrement, la barre rouge montre la durée, un vumètre par
 source, le périphérique utilisé et le rendez-vous lié (× pour le délier). Tu
-peux faire **Pause**, puis **Arrêter**. Juste après l’arrêt, le nom de la
-conversation est sélectionné : tape le nouveau nom, puis Entrée, pendant que
-Verbatim finalise l’audio.
+peux faire **Pause**, puis **Arrêter**. L’arrêt est immédiat : la
+compression des pistes, la frise et le fichier d’écoute sont produits pendant
+l’appel, et la transcription part aussitôt.
 
 Ce qui est garanti :
 
@@ -119,6 +129,11 @@ Ce qui est garanti :
   les envois en cours, pour ne pas payer pour rien.
 - **Micro coupé** : si le micro ne capte strictement rien pendant 6 s, la barre
   l’affiche en orange (« le micro est-il coupé ? »).
+- **Enregistrement oublié** : après 2 minutes sans aucun son, la barre passe
+  à l’orange (« Appel terminé ? ») et l’icône de Verbatim clignote dans la
+  barre des tâches. Si tu arrêtes plus tard, la longue fin silencieuse (plus
+  de 90 s) n’est pas envoyée à la transcription : tu ne la paies pas.
+  L’enregistrement complet reste sur ton disque.
 - Le PC ne se met pas en veille pendant un enregistrement.
 
 Si tu as une clé API et que **Transcrire automatiquement à l’arrêt** est coché,
@@ -186,6 +201,12 @@ ce qui part chez ElevenLabs :
   l’ordre du temps. Un peu meilleur quand vous parlez en même temps, pour un
   coût double. Tu peux comparer sur un même appel avec **Retranscrire…**.
 
+Un simple « oui » ou « hm » de ton interlocuteur pendant que tu parles ne
+coupe pas ton paragraphe : il apparaît à la suite, sur une ligne discrète.
+Pour appliquer ce découpage à une ancienne transcription en pistes séparées,
+**Réinitialiser** la recalcule sans rien repayer (tes corrections de voix
+sont alors à refaire).
+
 ## Corriger les locuteurs
 
 - Clique sur le nom d’une personne pour la **renommer**. Les noms déjà
@@ -218,11 +239,14 @@ conversation, lisible sans Verbatim :
 ```
 2026-11-02 14h05 Point projet\
   micro.flac, pc.flac       pistes originales, sans perte
-  ecoute.flac               mélange équilibré pour la lecture
+  ecoute.flac               mélange équilibré pour la lecture (16 kHz) ;
+                            c’est aussi le fichier envoyé en mode Automatique
   transcription.txt         dernière version, lisible
   transcriptions\…          chaque version : texte, locuteurs, réponses brutes
   note vocale.m4a           (fichiers importés) l’original intact
 ```
+
+Compte environ 105 Mo par heure d’appel à deux sources.
 
 ## Diagnostic
 

@@ -209,6 +209,9 @@ pub struct Settings {
     pub pc_device_name: String,
     /// Dossier de la bibliothèque ; vide = Documents\Verbatim.
     pub library_dir: String,
+    /// L'accueil du premier lancement a été vu (ou une clé existait déjà).
+    #[serde(default)]
+    pub onboarded: bool,
     /// Thème : « auto » (celui de Windows), « light » ou « dark ».
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -260,6 +263,7 @@ impl Default for Settings {
             library_dir: String::new(),
             people: Default::default(),
             theme: default_theme(),
+            onboarded: false,
             rate_samples: vec![],
             pending_charge: None,
         }
@@ -341,6 +345,9 @@ pub fn apply_patch(s: &mut Settings, raw: &Value) {
     }
     if let Some(v) = o.get("pending_charge") {
         s.pending_charge = v.as_array().and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?]));
+    }
+    if let Some(v) = o.get("onboarded").and_then(Value::as_bool) {
+        s.onboarded = v;
     }
     if let Some(v) = o.get("theme").and_then(Value::as_str).filter(|v| ["auto", "light", "dark"].contains(v)) {
         s.theme = v.into();

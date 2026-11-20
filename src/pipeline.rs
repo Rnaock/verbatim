@@ -47,6 +47,7 @@ pub fn apply_finalized(lib: &Library, id: &str, f: &Finalized) -> io::Result<Ite
         i.tracks = f.tracks.clone();
         i.playback = Some(f.playback.clone());
         i.echo = f.echo;
+        i.active_end = Some(f.active_end);
         i.recovered |= f.recovered;
         if f.recovered {
             i.notes.push("Enregistrement récupéré après une interruption : les dernières secondes ont pu être perdues.".into());
@@ -58,11 +59,16 @@ pub fn apply_finalized(lib: &Library, id: &str, f: &Finalized) -> io::Result<Ite
 }
 
 pub fn finalize_item<P: FnMut(f32)>(lib: &Library, id: &str, recover: bool, progress: P) -> io::Result<Item> {
+    finalize_item_with(lib, id, recover, None, progress)
+}
+
+/// `streamed` : ce que l'enregistreur a déjà produit (finalisation immédiate).
+pub fn finalize_item_with<P: FnMut(f32)>(lib: &Library, id: &str, recover: bool, streamed: Option<&recorder::Streamed>, progress: P) -> io::Result<Item> {
     let item = lib.load(id)?;
     let roles = if item.roles.is_empty() { vec![Role::Mic, Role::Pc] } else { item.roles.clone() };
     lib.update(id, |i| i.state = State::Finalizing)?;
     let dir = lib.dir(id)?;
-    match recorder::finalize(&dir, &roles, recover, progress) {
+    match recorder::finalize_with(&dir, &roles, recover, streamed, progress) {
         Ok(f) => {
             // Si l'enregistrement de l'état échoue, les WAV restent : la
             // finalisation sera refaite au prochain lancement.
@@ -202,8 +208,38 @@ pub struct Plan {
     pub mode: Mode,
     /// Pistes à envoyer : source connue ou non.
     pub parts: Vec<Option<Role>>,
+    /// Durée envoyée par partie (fin silencieuse retirée le cas échéant).
     pub seconds: f64,
+    /// Secondes de fin silencieuse non envoyées.
+    #[serde(default)]
+    pub trimmed: f64,
     pub notes: Vec<String>,
+}
+
+/// Fin silencieuse au-delà de laquelle on ne l'envoie pas (enregistrement oublié).
+const TRIM_AFTER: f64 = 90.0;
+/// Marge gardée après le dernier son.
+const TRIM_MARGIN: f64 = 3.0;
+
+fn human(secs: f64) -> String {
+    let m = (secs / 60.0).round() as u64;
+    if m >= 60 {
+        format!("{} h {:02}", m / 60, m % 60)
+    } else {
+        format!("{m} min")
+    }
+}
+
+/// Durée à envoyer : sans la longue fin silencieuse d'un enregistrement oublié.
+fn trim_tail(item: &Item, seconds: f64, notes: &mut Vec<String>) -> (f64, f64) {
+    match item.active_end {
+        Some(end) if item.kind == Kind::Recording && seconds - end > TRIM_AFTER => {
+            let keep = (end + TRIM_MARGIN).min(seconds);
+            notes.push(format!("Fin silencieuse de {} non envoyée à la transcription (l'enregistrement complet est conservé).", human(seconds - keep)));
+            (keep, seconds - keep)
+        }
+        _ => (seconds, 0.0),
+    }
 }
 
 impl Plan {
@@ -230,7 +266,9 @@ pub fn plan(item: &Item, pref: &str) -> io::Result<Plan> {
             }
         };
         let mode = if parts[0].is_some() { Mode::Separate } else { Mode::Single };
-        return Ok(Plan { mode, parts, seconds, notes: vec![] });
+        let mut notes = vec![];
+        let (seconds, trimmed) = trim_tail(item, seconds, &mut notes);
+        return Ok(Plan { mode, parts, seconds, trimmed, notes });
     }
     let mut notes = vec![];
     let speaking: Vec<Role> = item.tracks.iter().filter(|t| t.activity.speech_ratio >= MIN_SPEECH).map(|t| t.role).collect();
@@ -262,18 +300,27 @@ pub fn plan(item: &Item, pref: &str) -> io::Result<Plan> {
             }
         }
     };
-    Ok(Plan { mode, parts, seconds, notes })
+    let (seconds, trimmed) = trim_tail(item, seconds, &mut notes);
+    Ok(Plan { mode, parts, seconds, trimmed, notes })
 }
 
 fn upload_name(part: Option<Role>) -> String {
     format!("envoi-{}.flac", part.map(|r| r.stem()).unwrap_or("mix"))
 }
 
-fn encode_upload<F: FnMut() -> io::Result<Option<Vec<f32>>>>(out: &Path, mut next: F, total: f64, progress: &mut dyn FnMut(f32)) -> io::Result<()> {
+/// `limit` : nombre d'échantillons à ne pas dépasser (fin silencieuse retirée).
+fn encode_upload<F: FnMut() -> io::Result<Option<Vec<f32>>>>(out: &Path, mut next: F, total: f64, limit: Option<u64>, progress: &mut dyn FnMut(f32)) -> io::Result<()> {
     let tmp = out.with_extension("tmp");
     let mut w = FlacWriter::create(&tmp, UPLOAD_RATE)?;
     let mut done = 0f64;
-    while let Some(b) = next()? {
+    while let Some(mut b) = next()? {
+        if let Some(l) = limit {
+            let left = l.saturating_sub(done as u64) as usize;
+            if left == 0 {
+                break;
+            }
+            b.truncate(left);
+        }
         w.write(&b)?;
         done += b.len() as f64;
         if total > 0.0 {
@@ -291,12 +338,39 @@ pub fn prepare(lib: &Library, item: &Item, plan: &Plan, progress: &mut dyn FnMut
     let cache = dir.join(CACHE);
     fs::create_dir_all(&cache)?;
     let total = plan.seconds * UPLOAD_RATE as f64;
+    let limit = (plan.trimmed > 0.0).then_some(total as u64);
+    // Piste d'écoute en 16 kHz (écrite pendant l'enregistrement) : c'est déjà
+    // le mélange à envoyer, sans rien réencoder.
+    let ecoute = dir.join("ecoute.flac");
+    let ecoute_ready = item.playback.as_deref() == Some("ecoute.flac") && audio::media_info(&ecoute).map(|i| i.rate == Some(UPLOAD_RATE)).unwrap_or(false);
     let mut out = vec![];
     let n = plan.parts.len().max(1) as f32;
     for (k, part) in plan.parts.iter().enumerate() {
         let mut sub = |p: f32| progress((k as f32 + p) / n);
         let dest = cache.join(upload_name(*part));
         let track = |r: Role| item.tracks.iter().find(|t| t.role == r).cloned();
+        let whole_mix = matches!((plan.mode, part), (Mode::Mixed, None)) || (part.is_some() && item.tracks.len() == 1);
+        if ecoute_ready && whole_mix {
+            if limit.is_none() {
+                sub(1.0);
+                out.push(ecoute.clone());
+            } else {
+                let mut r = BlockReader::open(&ecoute, UPLOAD_RATE)?;
+                let mut x = vec![];
+                encode_upload(
+                    &dest,
+                    || {
+                        x.clear();
+                        Ok((r.read(16_000, &mut x)? > 0).then(|| x.clone()))
+                    },
+                    total,
+                    limit,
+                    &mut sub,
+                )?;
+                out.push(dest);
+            }
+            continue;
+        }
         match (plan.mode, part) {
             (Mode::Mixed, None) if item.tracks.len() >= 2 => {
                 let ta = track(Role::Mic).ok_or_else(|| io::Error::other("piste micro absente"))?;
@@ -318,6 +392,7 @@ pub fn prepare(lib: &Library, item: &Item, plan: &Plan, progress: &mut dyn FnMut
                         Ok(Some((0..na.max(nb)).map(|i| recorder::mix_sample(x.get(i).unwrap_or(&0.0) * ga, y.get(i).unwrap_or(&0.0) * gb)).collect()))
                     },
                     total,
+                    limit,
                     &mut sub,
                 )?;
                 out.push(dest);
@@ -334,6 +409,7 @@ pub fn prepare(lib: &Library, item: &Item, plan: &Plan, progress: &mut dyn FnMut
                         Ok((r.read(16_000, &mut x)? > 0).then(|| x.iter().map(|s| (s * g).clamp(-1.0, 1.0)).collect()))
                     },
                     total,
+                    limit,
                     &mut sub,
                 )?;
                 out.push(dest);
@@ -360,6 +436,7 @@ pub fn prepare(lib: &Library, item: &Item, plan: &Plan, progress: &mut dyn FnMut
                             Ok((r.read(16_000, &mut x)? > 0).then(|| x.clone()))
                         },
                         total,
+                        limit,
                         &mut sub,
                     )?;
                     out.push(dest);
@@ -521,6 +598,51 @@ mod tests {
         mic.finish().unwrap();
         pc.finish().unwrap();
         item.id
+    }
+
+    /// La piste d'écoute (16 kHz) sert directement d'envoi ; un enregistrement
+    /// oublié n'envoie pas sa longue fin silencieuse.
+    #[test]
+    fn envoi_sans_reencodage_et_fin_silencieuse_retiree() {
+        let root = tmpdir("envoi");
+        let lib = Library::open(&root).unwrap();
+        // Appel normal : l'envoi est la piste d'écoute elle-même.
+        let id = fake_recording(&lib, 0.1, false);
+        let it = finalize_item(&lib, &id, false, |_| {}).unwrap();
+        let p = plan(&it, "auto").unwrap();
+        assert_eq!((p.mode, p.trimmed), (Mode::Mixed, 0.0));
+        let files = prepare(&lib, &it, &p, &mut |_| {}).unwrap();
+        assert_eq!(files, vec![lib.dir(&id).unwrap().join("ecoute.flac")]);
+        clear_cache(&lib, &id);
+        assert!(files[0].exists(), "la piste d'écoute n'est pas un fichier temporaire");
+
+        // Enregistrement oublié : 20 s d'appel puis 5 min de silence.
+        let item = lib.create("Oubli", Kind::Recording, State::Recording).unwrap();
+        lib.update(&item.id, |i| i.roles = vec![Role::Mic, Role::Pc]).unwrap();
+        let dir = lib.dir(&item.id).unwrap();
+        let mut mic = WavWriter::create(&wav_path(&dir, Role::Mic), STORE_RATE).unwrap();
+        let mut pc = WavWriter::create(&wav_path(&dir, Role::Pc), STORE_RATE).unwrap();
+        for i in 0..320 {
+            let talk = i < 20;
+            mic.write(&sine(200.0, STORE_RATE, 1.0, if talk && i % 2 == 0 { 0.1 } else { 0.0005 })).unwrap();
+            pc.write(&sine(300.0, STORE_RATE, 1.0, if talk && i % 2 == 1 { 0.2 } else { 0.0 })).unwrap();
+        }
+        mic.finish().unwrap();
+        pc.finish().unwrap();
+        let it = finalize_item(&lib, &item.id, false, |_| {}).unwrap();
+        assert!((it.active_end.unwrap() - 20.0).abs() < 0.2, "{:?}", it.active_end);
+        for pref in ["auto", "separate"] {
+            let p = plan(&it, pref).unwrap();
+            assert!((p.seconds - 23.0).abs() < 0.3 && (p.trimmed - 297.0).abs() < 0.3, "{pref} : {} {}", p.seconds, p.trimmed);
+            assert!(p.notes.iter().any(|n| n.contains("Fin silencieuse de 5 min")), "{:?}", p.notes);
+            assert!((p.billed_seconds() - 23.0 * p.parts.len() as f64).abs() < 1.0);
+            for f in prepare(&lib, &it, &p, &mut |_| {}).unwrap() {
+                let d = audio::media_info(&f).unwrap().duration.unwrap();
+                assert!((d - 23.0).abs() < 0.3, "{pref} : {} dure {d}", f.display());
+            }
+        }
+        // L'original complet est intact.
+        assert!((audio::media_info(&dir.join("micro.flac")).unwrap().duration.unwrap() - 320.0).abs() < 0.1);
     }
 
     #[test]

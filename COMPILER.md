@@ -28,7 +28,8 @@ les sources (paquets Ubuntu `rustc-1.91 cargo-1.91 rust-1.91-src mingw-w64`) :
 Avec cette cible, joindre `WebView2Loader.dll` (fourni par le crate
 `webview2-com-sys`, dossier `x64/`) à côté de l’exe.
 
-Le script `tests/build-windows.sh build` reprend ces étapes. La variable
+Le script `tests/build-windows.sh build` lance l’étape 3 : `WINBUILD` désigne
+le dossier préparé aux étapes 1 et 2 (`rustsrc/library`, `wincrt/linker.sh`). La variable
 `VERBATIM_UPDATE_REPO=Rnaock/verbatim` active la mise à jour automatique.
 
 ## Publier une version

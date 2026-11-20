@@ -287,3 +287,21 @@ textarea.inp{min-height:80px; resize:vertical; font-family:var(--mono); font-siz
 .shot{display:flex; gap:12px; align-items:flex-start;}
 .shot img{width:220px; border:1px solid var(--line); border-radius:6px;}
 .ctx{max-height:180px; overflow:auto; font:11.5px/1.45 var(--mono); background:var(--sunk); padding:8px 10px; border-radius:6px; white-space:pre-wrap; margin-top:6px;}
+
+/* Enregistrement oublié */
+.recbar.forgot{background:var(--warn-soft);}
+.forgotmsg{color:var(--warn); font-weight:600; font-size:13.5px; display:inline-flex; gap:6px; align-items:center;}
+/* Relances courtes (« Oui. », « Hm. ») : une ligne discrète */
+.turn.brief{padding-top:1px; padding-bottom:1px;}
+.turn.brief > div{display:flex; gap:10px; align-items:baseline;}
+.turn.brief .para{font-size:15px; color:var(--slate); margin-top:0;}
+.turn.brief .ts{padding-top:1px; opacity:.6;}
+/* Premier lancement */
+.body.solo{grid-template-columns:1fr;}
+.page.onb{max-width:720px;}
+.onb-step{display:grid; grid-template-columns:34px 1fr; gap:14px; align-items:start;}
+.onb-n{width:28px; height:28px; border-radius:50%; background:var(--accent-soft); color:var(--accent); font:600 13px var(--mono); display:grid; place-items:center;}
+.onb-how{margin:2px 0 4px 18px; display:flex; flex-direction:column; gap:5px; font-size:13.5px;}
+.onb-how code{font-family:var(--mono); font-size:12.5px; background:var(--sunk); padding:1px 5px; border-radius:4px;}
+.onb-ok{color:var(--pc); font-weight:500; flex-wrap:wrap; gap:8px;}
+.big-cta{padding:10px 26px; font-size:15px;}
