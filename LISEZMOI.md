@@ -7,7 +7,7 @@ ElevenLabs Scribe v2, avec séparation des personnes.
 
 ## Installation
 
-1. **Avant d’extraire le zip** : clic droit sur `Verbatim-4.4.zip` →
+1. **Avant d’extraire le zip** : clic droit sur `Verbatim.zip` →
    Propriétés → coche **Débloquer** → OK.
 2. Extrais le dossier `Verbatim` où tu veux le garder. Garde les deux fichiers
    ensemble : `Verbatim.exe` a besoin de `WebView2Loader.dll` à côté de lui.

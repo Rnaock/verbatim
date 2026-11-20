@@ -44,3 +44,6 @@ conversation : identifiants abrégés avec `short_id`.
 3. Branche `mises-a-jour` : remplacer `Verbatim.exe` et `latest.json`
    (`version`, `sha256`, `size`, `notes`). L'application installée la propose
    alors au lancement.
+4. Même branche : remplacer `Verbatim.zip` (dossier `Verbatim/` avec
+   `Verbatim.exe`, `WebView2Loader.dll`, `LISEZMOI.md`,
+   `Diagnostic audio.cmd`). C'est le lien de téléchargement du `README.md`.
