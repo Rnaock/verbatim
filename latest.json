@@ -1,6 +1,6 @@
 {
- "version": "4.4.1",
- "sha256": "3990f38e50b0b03984677bf9d5fa31e6540c6ab35812580bbd8f6793c503fb1a",
- "size": 10183680,
- "notes": "L’arrêt d’un enregistrement est maintenant immédiat et les fichiers gardés sont plus légers. Si tu oublies de couper, Verbatim te prévient après 2 minutes de silence et n’envoie plus la fin silencieuse à la transcription. En pistes séparées, les petites relances ne hachent plus les paragraphes. Nouvel accueil au premier lancement. Icône plus lisible."
+ "version": "4.5.0",
+ "sha256": "d4ba9826f56d1b4e1b110c757fcfc2bc12ee3f507f9a1710846e270d7ae1ca91",
+ "size": 10205184,
+ "notes": "Les mises à jour passent maintenant par une fenêtre qui présente les nouveautés et te laisse ignorer une version. L’ancienne version est gardée : Réglages → Version permet d’y revenir en un clic. Si Verbatim s’arrête brutalement, il propose au lancement suivant d’envoyer un rapport technique par mail (rien ne part sans ton clic)."
 }
