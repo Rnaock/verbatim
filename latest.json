@@ -1,6 +1,6 @@
 {
- "version": "4.3.1",
- "sha256": "8ae68ba64f44794c50bc43c6b49f2a8112dc199e53744209a69e866c5343a458",
- "size": 10144768,
- "notes": "Coût des transcriptions corrigé : Verbatim passe par l’API d’ElevenLabs, bien moins chère que le site. Le coût en crédits est maintenant mesuré sur ton compte, et Verbatim ne bloque plus jamais un envoi sur une estimation."
+ "version": "4.4.0",
+ "sha256": "cbb0b0a53ff7c59094519d8647166390ca06ca865cfaf683d747844dfb259cec",
+ "size": 10171904,
+ "notes": "L’arrêt d’un enregistrement est maintenant immédiat et les fichiers gardés sont plus légers. Si tu oublies de couper, Verbatim te prévient après 2 minutes de silence et n’envoie plus la fin silencieuse à la transcription. En pistes séparées, les petites relances ne hachent plus les paragraphes. Nouvel accueil au premier lancement."
 }
