@@ -1,0 +1,41 @@
+# Crée ou met à jour la release GitHub à chaque changement de cette branche.
+# Aucune action tierce : uniquement git, jq, unzip et gh, déjà présents.
+name: Publier la release
+on:
+  push:
+    branches: [mises-a-jour]
+permissions:
+  contents: write
+concurrency: release
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publier Verbatim.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch mises-a-jour "https://github.com/$REPO" src
+          cd src
+          version=$(jq -r .version latest.json)
+          case "$version" in
+            ""|*[!0-9.]*) echo "version inattendue : $version"; exit 1;;
+          esac
+          attendu=$(jq -r .sha256 latest.json)
+          obtenu=$(unzip -p Verbatim.zip Verbatim/Verbatim.exe | sha256sum | cut -d' ' -f1)
+          if [ "$attendu" != "$obtenu" ]; then
+            echo "Verbatim.zip ne contient pas l'exe décrit par latest.json"; exit 1
+          fi
+          {
+            jq -r .notes latest.json
+            echo
+            echo "Télécharge **Verbatim.zip**, puis suis l'installation du [README](https://github.com/$REPO#installation). Les versions suivantes s'installent depuis Verbatim lui-même."
+          } > ../notes.md
+          if gh release view "v$version" -R "$REPO" >/dev/null 2>&1; then
+            gh release upload "v$version" Verbatim.zip --clobber -R "$REPO"
+          else
+            gh release create "v$version" Verbatim.zip -R "$REPO" --target main \
+              --title "Verbatim $version" --notes-file ../notes.md --latest
+          fi
