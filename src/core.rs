@@ -14,6 +14,8 @@ use std::time::Duration;
 use crate::vault;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Adresse où envoyer les rapports de plantage, fixée à la compilation.
+pub const CONTACT: Option<&str> = option_env!("VERBATIM_CONTACT");
 pub const DEFAULT_API: &str = "https://api.elevenlabs.io";
 pub const MAX_UPLOAD: u64 = 5 * 1024 * 1024 * 1024; // plafond ElevenLabs
 pub const DEFAULT_CREDITS: f64 = 330.0;
@@ -212,6 +214,12 @@ pub struct Settings {
     /// L'accueil du premier lancement a été vu (ou une clé existait déjà).
     #[serde(default)]
     pub onboarded: bool,
+    /// Version que l'utilisateur a choisi d'ignorer : elle n'est plus annoncée.
+    #[serde(default)]
+    pub skip_version: String,
+    /// Version remplacée par la dernière mise à jour (gardée à côté du programme).
+    #[serde(default)]
+    pub previous_version: String,
     /// Thème : « auto » (celui de Windows), « light » ou « dark ».
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -264,6 +272,8 @@ impl Default for Settings {
             people: Default::default(),
             theme: default_theme(),
             onboarded: false,
+            skip_version: String::new(),
+            previous_version: String::new(),
             rate_samples: vec![],
             pending_charge: None,
         }
@@ -348,6 +358,11 @@ pub fn apply_patch(s: &mut Settings, raw: &Value) {
     }
     if let Some(v) = o.get("onboarded").and_then(Value::as_bool) {
         s.onboarded = v;
+    }
+    for (key, slot) in [("skip_version", &mut s.skip_version), ("previous_version", &mut s.previous_version)] {
+        if let Some(v) = o.get(key).and_then(Value::as_str).filter(|v| v.is_empty() || crate::update::parse_version(v).is_some()) {
+            *slot = v.to_string();
+        }
     }
     if let Some(v) = o.get("theme").and_then(Value::as_str).filter(|v| ["auto", "light", "dark"].contains(v)) {
         s.theme = v.into();

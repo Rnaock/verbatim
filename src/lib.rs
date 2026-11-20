@@ -68,6 +68,55 @@ pub fn open_journal(path: PathBuf) {
 
 const RETRY_DELAYS: [u64; 3] = [5, 15, 45];
 
+/// Témoin de session : créé au lancement, retiré à la fermeture normale. S'il
+/// est encore là au lancement suivant, la session précédente a été interrompue
+/// (plantage, programme tué, PC éteint).
+const SESSION_MARK: &str = "session.txt";
+const START_LINE: &str = "démarrage de Verbatim";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Crash {
+    pub version: String,
+    pub panicked: bool,
+    pub tail: Vec<String>,
+}
+
+/// Fin du journal de la session précédente : les 40 lignes qui précèdent le
+/// dernier démarrage (celui de la session en cours).
+pub fn crash_report(version: &str, journal: &str) -> Crash {
+    let lines: Vec<&str> = journal.lines().collect();
+    let end = lines.iter().rposition(|l| l.contains(START_LINE)).unwrap_or(lines.len());
+    let tail: Vec<String> = lines[end.saturating_sub(40)..end].iter().map(|l| l.to_string()).collect();
+    // Le plantage compte s'il appartient à cette session-là, pas à une plus ancienne.
+    let session = tail.iter().rposition(|l| l.contains(START_LINE)).unwrap_or(0);
+    let panicked = tail[session..].iter().any(|l| l.contains("PLANTAGE"));
+    Crash { version: version.to_string(), panicked, tail }
+}
+
+/// Une adresse de contact sûre à placer dans un lien `mailto:`.
+fn valid_contact(c: &str) -> bool {
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|ch| ch.is_ascii_alphanumeric() || "._-+".contains(ch));
+    matches!(c.split_once('@'), Some((user, host)) if ok(user) && ok(host) && host.contains('.'))
+}
+
+/// Au lancement : relève un arrêt brutal de la session précédente, puis pose
+/// le témoin de la session en cours.
+fn begin_session(st: &App) {
+    let mark = st.paths.data_dir.join(SESSION_MARK);
+    if let Ok(previous) = std::fs::read_to_string(&mark) {
+        let version = previous.lines().next().unwrap_or("").trim().to_string();
+        let journal = std::fs::read_to_string(st.paths.data_dir.join("journal.txt")).unwrap_or_default();
+        let c = crash_report(if version.is_empty() { "?" } else { &version }, &journal);
+        trace(&format!("session précédente ({}) interrompue{}", c.version, if c.panicked { ", plantage consigné" } else { "" }));
+        *st.crash.lock().unwrap() = Some(c);
+    }
+    let _ = std::fs::write(&mark, core::VERSION);
+}
+
+fn end_session(st: &App) {
+    let _ = std::fs::remove_file(st.paths.data_dir.join(SESSION_MARK));
+}
+
 struct ActiveRec {
     id: String,
     recorder: Recorder,
@@ -90,6 +139,8 @@ pub struct App {
     busy: Arc<std::sync::atomic::AtomicUsize>,
     /// Dernière version trouvée sur GitHub.
     update: Mutex<Option<update::UpdateInfo>>,
+    /// Session précédente arrêtée brutalement : version et fin de son journal.
+    crash: Mutex<Option<Crash>>,
     /// Adresse iCal secrète (déchiffrée en mémoire seulement).
     cal_url: Mutex<Option<String>>,
     /// Agenda lu : instant de lecture et événements.
@@ -168,6 +219,12 @@ struct AppState {
     jobs: Vec<String>,
     updates: bool,
     repo: Option<String>,
+    /// Adresse des rapports de plantage (aucune : rapport par GitHub seulement).
+    contact: Option<&'static str>,
+    /// Version de la session précédente si elle s'est arrêtée brutalement.
+    crash: Option<String>,
+    /// Version précédente réinstallable (« précédente » si son numéro est inconnu).
+    rollback: Option<String>,
 }
 
 fn simulated_audio() -> bool {
@@ -187,6 +244,12 @@ fn app_state(st: St<'_>) -> AppState {
         jobs: st.jobs.lock().unwrap().keys().cloned().collect(),
         updates: update::REPO.is_some(),
         repo: update::REPO.map(String::from),
+        contact: core::CONTACT.filter(|c| valid_contact(c)),
+        crash: st.crash.lock().unwrap().as_ref().map(|c| c.version.clone()),
+        rollback: update::previous_exe().map(|_| {
+            let v = st.settings().previous_version;
+            if v.is_empty() { "précédente".into() } else { v }
+        }),
     }
 }
 
@@ -604,7 +667,9 @@ fn open_folder(st: St<'_>, id: Option<String>) -> Res<()> {
 #[tauri::command]
 fn open_url(app: AppHandle, url: String) -> Res<()> {
     let ideas = update::REPO.map(|r| format!("https://github.com/{r}/issues/new?")).filter(|p| url.starts_with(p.as_str())).is_some();
-    let allowed = url.starts_with("https://elevenlabs.io/") || calendar::is_meeting_url(&url) || ideas;
+    // Rapport de plantage : uniquement vers l'adresse fixée à la compilation.
+    let mail = core::CONTACT.filter(|c| valid_contact(c)).map(|c| format!("mailto:{c}?")).filter(|p| url.starts_with(p.as_str())).is_some();
+    let allowed = url.starts_with("https://elevenlabs.io/") || calendar::is_meeting_url(&url) || ideas || mail;
     if !allowed || url.chars().any(|c| c.is_whitespace() || c == '"') {
         return Err(ApiError::new(400, "adresse refusée"));
     }
@@ -930,14 +995,34 @@ fn sanitize_line(line: &str, library: &str, home: &str) -> String {
 /// du journal. Montré en entier à l'utilisateur avant publication.
 #[tauri::command]
 fn bug_context(st: St<'_>) -> String {
+    let journal = std::fs::read_to_string(st.paths.data_dir.join("journal.txt")).unwrap_or_default();
+    let tail: Vec<&str> = journal.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect();
+    context_text(&st, core::VERSION, &tail)
+}
+
+/// Rapport d'un arrêt brutal : version concernée et fin du journal de cette
+/// session-là. Montré en entier avant tout envoi.
+#[tauri::command]
+fn crash_context(st: St<'_>) -> Res<String> {
+    let c = st.crash.lock().unwrap().clone().ok_or(ApiError::new(404, "aucun arrêt brutal à signaler"))?;
+    let tail: Vec<&str> = c.tail.iter().map(String::as_str).collect();
+    Ok(format!("Arrêt brutal de Verbatim{}\n{}", if c.panicked { " (plantage consigné)" } else { "" }, context_text(&st, &c.version, &tail)))
+}
+
+/// L'utilisateur a vu la proposition de rapport : ne plus la montrer.
+#[tauri::command]
+fn crash_dismiss(st: St<'_>) {
+    *st.crash.lock().unwrap() = None;
+}
+
+fn context_text(st: &App, version: &str, tail: &[&str]) -> String {
     let s = st.settings();
     let lib = st.lib().root.to_string_lossy().into_owned();
     let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
-    let journal = std::fs::read_to_string(st.paths.data_dir.join("journal.txt")).unwrap_or_default();
-    let tail: Vec<String> = journal.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().map(|l| sanitize_line(l, &lib, &home)).collect();
+    let tail: Vec<String> = tail.iter().map(|l| sanitize_line(l, &lib, &home)).collect();
     let mut text = format!(
         "Verbatim {} · {} · sources micro={} pc={} · mode {} · thème {}\n\nJournal (40 dernières lignes) :\n```\n{}\n```",
-        core::VERSION,
+        version,
         std::env::consts::OS,
         s.rec_mic,
         s.rec_pc,
@@ -984,6 +1069,16 @@ fn install_and_restart(app: &AppHandle, st: &App, candidate: &Path) -> Res<()> {
     ensure_idle(st)?;
     let exe = update::swap(candidate).map_err(|e| ApiError::new(500, e))?;
     trace(&format!("mise à jour vers {version} installée"));
+    // La version quittée reste à côté du programme. En cas de retour en
+    // arrière, elle n'est plus annoncée comme une nouveauté.
+    let mut patch = serde_json::json!({ "previous_version": core::VERSION });
+    if !update::is_newer(&version, core::VERSION) {
+        patch["skip_version"] = core::VERSION.into();
+    }
+    {
+        let _g = st.settings_lock.lock().unwrap();
+        let _ = core::save_settings(&st.paths, &patch);
+    }
     update::relaunch(&exe).map_err(|e| ApiError::new(500, format!("{e}. Relance Verbatim à la main : la nouvelle version est en place.")))?;
     app.exit(0);
     Ok(())
@@ -1004,6 +1099,21 @@ async fn update_install(app: AppHandle, st: St<'_>) -> Res<()> {
     .await?;
     let (app3, st3) = (app.clone(), st.inner().clone());
     tauri::async_runtime::spawn_blocking(move || install_and_restart(&app3, &st3, &path)).await.map_err(err)?
+}
+
+/// Réinstalle la version gardée à côté du programme lors de la dernière mise à jour.
+#[tauri::command]
+async fn update_rollback(app: AppHandle, st: St<'_>) -> Res<()> {
+    ensure_idle(&st)?;
+    let previous = update::previous_exe().ok_or(ApiError::new(404, "aucune version précédente à côté de Verbatim"))?;
+    let (app2, st2) = (app.clone(), st.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        // Copie d'abord : le fichier d'origine est remplacé pendant l'échange.
+        let candidate = update::stage_file(&st2.paths.data_dir, &previous).map_err(|e| ApiError::new(400, e))?;
+        install_and_restart(&app2, &st2, &candidate)
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -1475,6 +1585,29 @@ mod cost_tests {
     }
 
     #[test]
+    fn arret_brutal_fin_du_journal_de_la_session() {
+        let j = "[a] démarrage de Verbatim 4.4.0 (windows)\n[a] fermeture de Verbatim\n\
+                 [b] démarrage de Verbatim 4.4.1 (windows)\n[b] enregistrement lancé\n[b] PLANTAGE : index out of bounds\n\
+                 [c] démarrage de Verbatim 4.4.1 (windows)\n[c] session précédente interrompue";
+        let c = crash_report("4.4.1", j);
+        assert!(c.panicked);
+        assert_eq!(c.tail.last().unwrap(), "[b] PLANTAGE : index out of bounds");
+        assert!(!c.tail.iter().any(|l| l.starts_with("[c]")));
+        // Un plantage d'une session plus ancienne ne compte pas pour la dernière.
+        let j = "[a] démarrage de Verbatim 4.4.0\n[a] PLANTAGE : x\n[b] démarrage de Verbatim 4.4.1\n[b] enregistrement lancé\n[c] démarrage de Verbatim 4.4.1";
+        assert!(!crash_report("4.4.1", j).panicked);
+        assert!(crash_report("4.4.1", "").tail.is_empty());
+    }
+
+    #[test]
+    fn adresse_de_contact() {
+        assert!(valid_contact("prenom.nom+verbatim@exemple.fr"));
+        for bad in ["", "sans-arobase", "a@b", "a b@c.fr", "a@c.fr?cc=x@y.fr", "a@c.fr&body=x", "a\"@c.fr"] {
+            assert!(!valid_contact(bad), "{bad}");
+        }
+    }
+
+    #[test]
     fn journal_partage_sans_titres() {
         let lib = r"C:\Users\Manuel\Documents\Verbatim";
         let home = r"C:\Users\Manuel";
@@ -1629,6 +1762,7 @@ pub fn run() {
         requests_sem: Arc::new(tokio::sync::Semaphore::new(2)),
         busy: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         update: Mutex::new(None),
+        crash: Mutex::new(None),
         cal_url: Mutex::new(cal_url),
         cal_cache: Mutex::new(None),
     });
@@ -1650,6 +1784,7 @@ pub fn run() {
             let _ = app.asset_protocol_scope().allow_directory(&lib.root, true);
             let handle = app.handle().clone();
             update::cleanup(&st.paths.data_dir);
+            begin_session(&st);
             if update::REPO.is_some() {
                 let (st_u, h_u) = (st.clone(), handle.clone());
                 tauri::async_runtime::spawn(async move {
@@ -1752,10 +1887,19 @@ pub fn run() {
             bug_context,
             reveal_file,
             update_install,
-            update_install_file
+            update_install_file,
+            update_rollback,
+            crash_context,
+            crash_dismiss
         ])
-        .run(tauri::generate_context!())
-        .expect("échec du lancement de Verbatim");
+        .build(tauri::generate_context!())
+        .expect("échec du lancement de Verbatim")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                end_session(&app.state::<Arc<App>>());
+                trace("fermeture de Verbatim");
+            }
+        });
 }
 
 /// `Verbatim.exe --capture-test image.png` : vérifie la capture et le

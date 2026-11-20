@@ -30,7 +30,9 @@ Avec cette cible, joindre `WebView2Loader.dll` (fourni par le crate
 
 Le script `tests/build-windows.sh build` lance l’étape 3 : `WINBUILD` désigne
 le dossier préparé aux étapes 1 et 2 (`rustsrc/library`, `wincrt/linker.sh`). La variable
-`VERBATIM_UPDATE_REPO=Rnaock/verbatim` active la mise à jour automatique.
+`VERBATIM_UPDATE_REPO=Rnaock/verbatim` active la recherche de mises à jour.
+`VERBATIM_CONTACT=adresse@exemple.fr` fixe l’adresse des rapports de plantage
+(« Envoyer par mail ») ; sans elle, le rapport se signale sur GitHub.
 
 ## Publier une version
 

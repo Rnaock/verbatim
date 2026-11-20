@@ -62,6 +62,7 @@ let S = {
   items: {}, selected: null, query: '', hits: null, recording: null, live: null,
   progress: {}, balance: null, balanceError: null, devices: null, drawer: false, toast: null, dragging: false,
   updates: false, update: null, updating: null, updateFile: null, report: null, quick: false,
+  updateDialog: false, updateManual: false, contact: null, rollback: null, crash: null,
   cal: { connected: false, now: [], next: null, error: null }, calState: null,
 };
 const subs = new Set();
@@ -103,8 +104,10 @@ async function refreshState() {
     set({ onboarding: !st.settings.onboarded && !hasKey });
     // Déjà utilisateur (clé présente) : l'accueil ne sera jamais proposé.
     if (hasKey && !st.settings.onboarded) invoke('settings_set', { patch: { onboarded: true } }).catch(() => {});
+    // Session précédente interrompue : proposer d'envoyer le rapport.
+    if (st.crash) invoke('crash_context').then(context => set({ crash: { version: st.crash, context } })).catch(() => {});
   }
-  set({ ready: true, version: st.version, key: st.key, settings: st.settings, library: st.library, windows: st.windows, simulated: st.simulated_audio, updates: st.updates, repo: st.repo, recording: st.recording ? { id: st.recording } : null });
+  set({ ready: true, version: st.version, key: st.key, settings: st.settings, library: st.library, windows: st.windows, simulated: st.simulated_audio, updates: st.updates, repo: st.repo, contact: st.contact, rollback: st.rollback, recording: st.recording ? { id: st.recording } : null });
   return st;
 }
 async function loadLibrary() {
@@ -160,6 +163,19 @@ const whenLabel = e => { const m = Math.round((e.start * 1000 - Date.now()) / 60
 const joinAndRecord = async e => { if (e.meet) openUrl(e.meet); await startRecording(null, e.uid); };
 const pickAndImport = () => invoke('pick_files').then(importPaths).catch(e => toast(errMsg(e)));
 const openUrl = url => invoke('open_url', { url }).catch(e => toast(errMsg(e)));
+// Lien « mailto: » : les messageries tronquent les adresses trop longues, donc
+// on garde le début du texte (description, version) et la fin du journal.
+function mailUrl(to, subject, text) {
+  const head = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=`;
+  const room = 1900 - head.length;
+  const lines = text.split('\n');
+  const build = () => encodeURIComponent(lines.join('\n'));
+  let cut = false;
+  while (build().length > room && lines.length > 7) { lines.splice(cut ? 6 : 5, 1, ...(cut ? [] : ['[…]'])); cut = true; }
+  let body = lines.join('\n');
+  while (encodeURIComponent(body).length > room && body.length > 0) body = body.slice(0, -20);
+  return head + encodeURIComponent(body);
+}
 
 /* ------------------------------------------------------------------ */
 /* Icônes                                                              */
@@ -274,7 +290,7 @@ function Top() {
 /* Mises à jour                                                        */
 /* ------------------------------------------------------------------ */
 async function installUpdate(file) {
-  set({ updating: 0 });
+  set({ updating: 0, updateDialog: false });
   try {
     if (file !== undefined) {
       const done = await invoke('update_install_file', { path: file });
@@ -286,7 +302,7 @@ async function installUpdate(file) {
 async function checkUpdate(manual) {
   try {
     const u = await invoke('update_check');
-    set({ update: u });
+    set({ update: u, updateManual: !!manual });
     if (manual && !u) toast(`Verbatim ${S.version} est à jour.`);
   } catch (e) { if (manual) toast('Vérification impossible : ' + errMsg(e)); }
 }
@@ -296,6 +312,8 @@ function UpdateBar() {
   const file = useStore(s => s.updateFile);
   const updating = useStore(s => s.updating);
   const recording = useStore(s => s.recording);
+  const skipped = useStore(s => s.settings.skip_version);
+  const manual = useStore(s => s.updateManual);
   const [later, setLater] = useState(false);
   if (updating != null) return html`<div class="updbar"><b>Installation de la nouvelle version…</b>
     <div class="progress" style="width:160px;margin:0"><i style=${`width:${Math.round(updating * 100)}%`}></i></div>
@@ -304,13 +322,87 @@ function UpdateBar() {
     <span class="grow"></span>
     <button class="btn small primary" disabled=${!!recording} onClick=${() => { set({ updateFile: null }); installUpdate(file); }}>Installer et redémarrer</button>
     <button class="btn small ghost" onClick=${() => set({ updateFile: null })}>Annuler</button></div>`;
-  if (!u || later) return null;
+  // Une version ignorée n'est plus annoncée, sauf recherche demandée à la main.
+  if (!u || later || (u.version === skipped && !manual)) return null;
   return html`<div class="updbar"><span><b>Verbatim ${u.version}</b> est disponible.</span>
-    ${u.notes ? html`<${Tip} text=${u.notes.slice(0, 600)} />` : null}
     <span class="grow"></span>
-    ${recording ? html`<small class="muted">Après l’enregistrement.</small>` : null}
-    <button class="btn small primary" disabled=${!!recording} onClick=${() => installUpdate()}>Mettre à jour</button>
+    <button class="btn small primary" onClick=${() => set({ updateDialog: true })}>Voir</button>
     <button class="btn small ghost" onClick=${() => setLater(true)}>Plus tard</button></div>`;
+}
+
+// Rien ne s'installe sans passer par cette fenêtre : nouveautés, avertissement
+// et marche arrière.
+function UpdateDialog() {
+  const open = useStore(s => s.updateDialog);
+  const u = useStore(s => s.update);
+  const version = useStore(s => s.version);
+  const recording = useStore(s => s.recording);
+  if (!open || !u) return null;
+  const close = () => set({ updateDialog: false });
+  const skip = () => { saveSettings({ skip_version: u.version }); set({ updateDialog: false, updateManual: false }); toast(`Verbatim ${u.version} ne sera plus proposé. Tu le retrouves dans Réglages → Version.`); };
+  return html`<div class="backdrop dim" onClick=${close}></div>
+  <div class="modal" role="dialog" aria-label="Nouvelle version">
+    <h2>Verbatim ${u.version} est disponible</h2>
+    <small class="muted">Tu utilises Verbatim ${version}.</small>
+    ${u.notes ? html`<p class="notes">${u.notes.slice(0, 1200)}</p>` : null}
+    <${Note} kind="warn"><span><b>Verbatim est un projet amateur.</b> Une mise à jour apporte des nouveautés et des corrections, et peut aussi casser quelque chose qui marchait. Si ta version te convient, tu peux la garder.</span><//>
+    <div class="howback"><b>Revenir en arrière si besoin</b>
+      <span>Dans Verbatim : Réglages → Version → « Revenir à Verbatim ${version} ».</span>
+      <span>Si Verbatim ne démarre plus : dans son dossier, supprime <code>Verbatim.exe</code>, puis renomme <code>Verbatim-precedent.exe</code> en <code>Verbatim.exe</code>.</span>
+      <span>Dans les deux cas, tes conversations, ta clé et tes réglages restent en place.</span></div>
+    <div class="row"><button class="btn primary" disabled=${!!recording} onClick=${() => installUpdate()}>Installer et redémarrer</button>
+      ${recording ? html`<small class="muted">Après l’enregistrement.</small>` : null}
+      <span class="grow"></span>
+      <button class="btn ghost" onClick=${skip}>Ignorer cette version</button>
+      <button class="btn" onClick=${close}>Plus tard</button></div>
+  </div>`;
+}
+
+// Retour à la version gardée à côté du programme lors de la dernière mise à jour.
+function Rollback() {
+  const rollback = useStore(s => s.rollback);
+  const recording = useStore(s => s.recording);
+  const [sure, setSure] = useState(false);
+  if (!rollback) return null;
+  const name = rollback === 'précédente' ? 'la version précédente' : 'Verbatim ' + rollback;
+  const go = async () => {
+    set({ updating: 0, drawer: false });
+    try { await invoke('update_rollback'); } catch (e) { set({ updating: null }); toast('Retour impossible : ' + errMsg(e)); }
+  };
+  return html`<div class="row">${sure
+    ? html`<span>Réinstaller ${name} ? Verbatim va redémarrer.</span>
+        <button class="btn small primary" disabled=${!!recording} onClick=${go}>Oui, revenir</button>
+        <button class="btn small ghost" onClick=${() => setSure(false)}>Annuler</button>`
+    : html`<button class="btn small" onClick=${() => setSure(true)}>Revenir à ${name}</button>`}</div>`;
+}
+
+// Au lancement qui suit un arrêt brutal : proposer d'envoyer le rapport.
+function CrashModal() {
+  const c = useStore(s => s.crash);
+  const contact = useStore(s => s.contact);
+  const repo = useStore(s => s.repo);
+  const [what, setWhat] = useState('');
+  const [sent, setSent] = useState(false);
+  if (!c) return null;
+  const close = () => { set({ crash: null }); invoke('crash_dismiss').catch(() => {}); };
+  const text = () => [what.trim() ? 'Ce que je faisais : ' + what.trim() : null, c.context].filter(Boolean).join('\n\n');
+  const subject = `Verbatim ${c.version} : arrêt brutal`;
+  const mail = () => { openUrl(mailUrl(contact, subject, text())); setSent(true); };
+  const github = () => { openUrl(`https://github.com/${repo}/issues/new?` + new URLSearchParams({ title: 'Bug : ' + subject, body: text().slice(0, 5500), labels: 'bug' }).toString()); setSent(true); };
+  const copy = () => navigator.clipboard.writeText(subject + '\n\n' + text()).then(() => toast(contact ? `Rapport copié : colle-le dans un message à ${contact}.` : 'Rapport copié.'));
+  return html`<div class="backdrop dim"></div>
+  <div class="modal" role="dialog" aria-label="Arrêt brutal">
+    <h2>Verbatim ne s’est pas fermé normalement</h2>
+    <p>La dernière fois, Verbatim ${c.version} s’est arrêté d’un coup : plantage, programme fermé de force ou PC éteint. Si c’était un plantage, envoie le rapport pour qu’il soit corrigé.</p>
+    <input class="inp" placeholder="Ce que tu faisais à ce moment-là (facultatif)" value=${what} onInput=${e => setWhat(e.target.value)} />
+    <details><summary class="muted" style="cursor:pointer">Voir exactement ce qui sera envoyé</summary><pre class="ctx">${c.context}</pre></details>
+    <${Note}>Rapport technique : version, réglages audio, fin du journal. Il ne contient ni titre, ni nom, ni texte de conversation. Tes enregistrements sont intacts sur ton PC.<//>
+    ${sent ? html`<small class="muted">${contact ? `Ta messagerie s’ouvre : il reste à envoyer le message. Si rien ne s’ouvre, copie le rapport et envoie-le à ${contact}.` : 'Page GitHub ouverte : il reste à valider.'}</small>` : null}
+    <div class="row">${contact ? html`<button class="btn primary" onClick=${mail}>Envoyer par mail</button>`
+        : html`<button class="btn primary" disabled=${!repo} onClick=${github}>Signaler sur GitHub</button>`}
+      <button class="btn" onClick=${copy}>Copier le rapport</button>
+      <span class="grow"></span><button class="btn ghost" onClick=${close}>${sent ? 'Fermer' : 'Ne pas envoyer'}</button></div>
+  </div>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1132,6 +1224,7 @@ async function openReport(kind) {
 function ReportModal() {
   const r = useStore(s => s.report);
   const repo = useStore(s => s.repo);
+  const contact = useStore(s => s.contact);
   const version = useStore(s => s.version);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -1166,6 +1259,7 @@ function ReportModal() {
       ${withCtx ? html`<details><summary class="muted" style="cursor:pointer">Voir exactement ce qui sera joint</summary><pre class="ctx">${r.context}</pre></details>` : null}` : null}
     <${Note} kind="warn">Publié sur GitHub, <b>visible par tous</b>. ${bug ? 'Vérifie que la capture ne montre pas de conversation privée (sinon, ne la colle pas). ' : ''}Le journal ne contient ni titre, ni nom, ni texte de conversation.<//>
     <div class="row"><button class="btn primary" disabled=${!title.trim() || !repo} onClick=${send}>Ouvrir sur GitHub</button>
+      ${contact ? html`<button class="btn" disabled=${!title.trim()} title="Sans compte GitHub : le message part en privé, sans la capture" onClick=${() => { openUrl(mailUrl(contact, 'Verbatim, ' + (bug ? 'bug : ' : 'idée : ') + title.trim(), text())); toast('Ta messagerie s’ouvre : il reste à envoyer.'); close(); }}>Par mail</button>` : null}
       <button class="btn" disabled=${!title.trim()} onClick=${() => navigator.clipboard.writeText(title.trim() + '\n\n' + text()).then(() => toast('Copié.'))}>Copier le texte</button>
       <span class="grow"></span><button class="btn ghost" onClick=${close}>Annuler</button></div>
   </div>`;
@@ -1275,10 +1369,11 @@ function Drawer() {
       <div class="stack"><span>Verbatim ${version}</span>
         <div class="row">${updates ? html`<button class="btn small" onClick=${() => checkUpdate(true)}>Rechercher une mise à jour</button>` : null}
           <button class="btn small" onClick=${() => installUpdate(null)}>Installer depuis un fichier…</button></div>
+        <${Rollback} />
         <div class="row"><button class="btn small" onClick=${() => { set({ drawer: false }); openReport('bug'); }}>Signaler un problème…</button>
           <button class="btn small" onClick=${() => openReport('idea')}>Proposer une idée…</button>
           <button class="btn small ghost" title="Démarrages, périphériques, erreurs : sans titres, noms ni texte des conversations" onClick=${() => invoke('journal_show').catch(e => toast(errMsg(e)))}>Ouvrir le journal</button></div>
-        <small class="muted">Une mise à jour remplace seulement le programme : conversations, clé et réglages restent en place. Tu peux aussi glisser un Verbatim.exe ou son zip dans la fenêtre.</small></div>
+        <small class="muted">Une mise à jour remplace seulement le programme : conversations, clé et réglages restent en place. L’ancienne version reste à côté (<code>Verbatim-precedent.exe</code>) pour pouvoir y revenir. Tu peux aussi glisser un Verbatim.exe ou son zip dans la fenêtre.</small></div>
     </section>
   </aside>`;
 }
@@ -1298,6 +1393,8 @@ function App() {
   if (!ready) return null;
   return html`<div class=${'shell' + (dragging ? ' dragging' : '')}>
     <${ReportModal} />
+    <${UpdateDialog} />
+    ${onboarding ? null : html`<${CrashModal} />`}
     <${Top} />
     <${UpdateBar} />
     <${RecBar} />

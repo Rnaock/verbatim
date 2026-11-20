@@ -29,6 +29,9 @@ possible pour une porte dérobée.
   API, de l'adresse d'agenda, d'audio ou de texte ailleurs qu'à ElevenLabs,
   affaiblissement de la CSP, des listes d'URL autorisées
   (`open_url`, `update::HOSTS`) ou du chiffrement DPAPI.
+- Les rapports de plantage partent par un mail que l'utilisateur relit et
+  envoie lui-même (`mailto:` vers `VERBATIM_CONTACT`). Jamais d'envoi
+  automatique.
 
 ## Données de l'utilisateur
 
@@ -40,7 +43,10 @@ conversation : identifiants abrégés avec `short_id`.
 ## Publier une version
 
 1. Monter la version (`Cargo.toml`, `tauri.conf.json`), tests verts.
-2. Compiler avec `VERBATIM_UPDATE_REPO=Rnaock/verbatim`.
+2. Compiler avec `VERBATIM_UPDATE_REPO=Rnaock/verbatim` et
+   `VERBATIM_CONTACT` = l'adresse de Manuel pour les rapports de plantage
+   (son adresse du premier commit du dépôt, avec l'alias `+verbatim`).
+   Vérifier après compilation qu'elle est bien dans l'exe.
 3. Branche `mises-a-jour` : remplacer `Verbatim.exe` et `latest.json`
    (`version`, `sha256`, `size`, `notes`). L'application installée la propose
    alors au lancement.

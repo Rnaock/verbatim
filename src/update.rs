@@ -3,9 +3,11 @@
 //!
 //! Les données ne bougent jamais : clé et réglages dans %LOCALAPPDATA%\Verbatim,
 //! conversations dans la bibliothèque. Seul l'exécutable est remplacé :
-//! l'ancien est renommé en `Verbatim.old.exe` (Windows autorise le renommage
-//! d'un programme en cours d'exécution), le nouveau prend sa place, puis il est
-//! lancé et attend la fin de l'ancien processus.
+//! l'ancien est renommé en `Verbatim-precedent.exe` (Windows autorise le
+//! renommage d'un programme en cours d'exécution), le nouveau prend sa place,
+//! puis il est lancé et attend la fin de l'ancien processus. L'ancien reste à
+//! côté : c'est lui que « Revenir à la version précédente » réinstalle, et il
+//! suffit de le renommer à la main si la nouvelle version ne démarre plus.
 
 use crate::core::{ApiError, Res, VERSION};
 use serde::Serialize;
@@ -17,7 +19,9 @@ use std::time::Duration;
 /// Dépôt GitHub public des versions (« propriétaire/depot »), fixé à la compilation.
 pub const REPO: Option<&str> = option_env!("VERBATIM_UPDATE_REPO");
 const EXE: &str = "Verbatim.exe";
-const OLD: &str = "Verbatim.old.exe";
+pub const PREVIOUS: &str = "Verbatim-precedent.exe";
+/// Nom utilisé jusqu'à la 4.4 (supprimé au lancement suivant).
+const LEGACY_OLD: &str = "Verbatim.old.exe";
 /// Hôtes autorisés pour le téléchargement (GitHub et son stockage).
 const HOSTS: &[&str] = &["api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "raw.githubusercontent.com"];
 /// Branche du dépôt qui porte la dernière version : `latest.json` + `Verbatim.exe`.
@@ -251,7 +255,7 @@ pub fn probe(candidate: &Path) -> Result<String, String> {
 pub fn swap(candidate: &Path) -> Result<PathBuf, String> {
     let current = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = current.parent().ok_or("dossier de Verbatim introuvable")?.to_path_buf();
-    let old = dir.join(OLD);
+    let old = dir.join(PREVIOUS);
     let _ = std::fs::remove_file(&old);
     std::fs::rename(&current, &old).map_err(|e| format!("impossible de remplacer Verbatim (dossier protégé ?) : {e}"))?;
     if let Err(e) = std::fs::copy(candidate, &current) {
@@ -271,12 +275,24 @@ pub fn relaunch(exe: &Path) -> Result<(), String> {
         .map_err(|e| format!("relance impossible : {e}"))
 }
 
-/// Au démarrage : ménage de l'ancienne version et du dossier de préparation.
+/// Chemin de la version précédente, si elle est encore à côté du programme.
+pub fn previous_exe() -> Option<PathBuf> {
+    let p = std::env::current_exe().ok()?.parent()?.join(PREVIOUS);
+    p.is_file().then_some(p)
+}
+
+/// Au démarrage : ménage du dossier de préparation. Une version installée par
+/// Verbatim 4.4 ou plus ancien a laissé `Verbatim.old.exe` : il devient la
+/// version précédente (ou disparaît s'il y en a déjà une).
 pub fn cleanup(data_dir: &Path) {
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+        let (legacy, previous) = (dir.join(LEGACY_OLD), dir.join(PREVIOUS));
         for _ in 0..5 {
-            let old = dir.join(OLD);
-            if !old.exists() || std::fs::remove_file(&old).is_ok() {
+            if !legacy.exists() {
+                break;
+            }
+            let done = if previous.exists() { std::fs::remove_file(&legacy).is_ok() } else { std::fs::rename(&legacy, &previous).is_ok() };
+            if done {
                 break;
             }
             std::thread::sleep(Duration::from_millis(400));

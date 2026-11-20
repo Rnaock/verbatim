@@ -20,7 +20,21 @@ Liste des évolutions décidées, à reprendre à la prochaine mise à jour.
 - Icône plus lisible : tuile bleue vive, barres blanches, trois barres sous
   32 px (`tests/make-icons.py`).
 
+## Fait en 4.5
+
+- Mise à jour jamais installée sans passer par une fenêtre : nouveautés,
+  avertissement « projet amateur », marche arrière, « Ignorer cette version ».
+- Version précédente gardée (`Verbatim-precedent.exe`) et bouton « Revenir à
+  Verbatim x.y » dans Réglages → Version.
+- Arrêt brutal détecté au lancement suivant (témoin `session.txt`) : rapport
+  proposé par mail pré-rempli, ou copie.
+- Signalement « Par mail » pour qui n'a pas de compte GitHub.
+
 ## À étudier
+
+- Rapports de plantage : les plantages natifs (pilote audio, WebView2) ne
+  laissent pas de trace dans le journal, seulement l'arrêt brutal. Un envoi
+  automatique demanderait un serveur de réception et le consentement.
 
 - Enregistrement oublié : proposer de couper aussi le fichier conservé (pour
   l'instant seul l'envoi est raccourci), et arrêt automatique optionnel après

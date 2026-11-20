@@ -305,3 +305,9 @@ textarea.inp{min-height:80px; resize:vertical; font-family:var(--mono); font-siz
 .onb-how code{font-family:var(--mono); font-size:12.5px; background:var(--sunk); padding:1px 5px; border-radius:4px;}
 .onb-ok{color:var(--pc); font-weight:500; flex-wrap:wrap; gap:8px;}
 .big-cta{padding:10px 26px; font-size:15px;}
+
+/* Mise à jour : nouveautés et marche arrière */
+.modal .notes{white-space:pre-wrap; margin:10px 0;}
+.howback{display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--slate); margin:10px 0 14px;}
+.howback b{color:var(--ink);}
+.howback code{font:12px var(--mono);}

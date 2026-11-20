@@ -56,7 +56,27 @@ transcription et ton solde.
 ## Mises à jour
 
 Verbatim vérifie au lancement si une nouvelle version existe ici et te
-propose de l’installer. Rien à retélécharger.
+l’annonce. Rien ne s’installe sans ton accord.
+
+**Verbatim est un projet amateur.** Une mise à jour apporte des nouveautés et
+des corrections, et peut aussi casser quelque chose qui marchait. Si ta
+version te convient, tu peux la garder (bouton **Ignorer cette version**).
+
+Pour revenir en arrière après une mise à jour :
+
+- dans Verbatim : Réglages → **Version** → **Revenir à Verbatim x.y** ;
+- si Verbatim ne démarre plus : dans son dossier, supprime `Verbatim.exe`
+  puis renomme `Verbatim-precedent.exe` en `Verbatim.exe` ;
+- toutes les versions restent téléchargeables dans les
+  [Releases](https://github.com/Rnaock/verbatim/releases).
+
+Tes conversations, ta clé et tes réglages restent en place.
+
+## Si Verbatim plante
+
+Au lancement suivant, Verbatim propose d’envoyer un rapport technique à
+l’auteur par mail. Tu le relis avant, et rien ne part sans ton clic. Il ne
+contient ni titre, ni nom, ni texte de conversation.
 
 ## Une idée, un bug
 

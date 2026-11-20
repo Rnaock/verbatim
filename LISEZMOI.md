@@ -1,4 +1,4 @@
-# Verbatim 4.4
+# Verbatim 4.5
 
 Enregistre et transcrit n’importe quelle conversation : ton micro, le son du
 PC (visio, appel, vidéo), ou les deux à la fois. Importe aussi les fichiers de
@@ -52,14 +52,46 @@ protection est donc ton compte GitHub : active la validation en deux étapes
 (GitHub → Settings → Password and authentication).
 
 Au lancement, Verbatim regarde s’il existe une version plus récente sur
-github.com/Rnaock/verbatim et l’annonce dans un bandeau : **Mettre à jour**
-télécharge, vérifie l’empreinte du fichier, remplace le programme et
-redémarre. Jamais pendant un enregistrement ou une transcription.
+github.com/Rnaock/verbatim et l’annonce dans un bandeau. Rien ne s’installe
+tout seul : **Voir** ouvre une fenêtre avec les nouveautés, puis tu choisis
+**Installer et redémarrer**, **Plus tard** ou **Ignorer cette version** (elle
+ne sera plus annoncée, et reste accessible dans Réglages → **Version**).
+L’installation télécharge, vérifie l’empreinte du fichier, remplace le
+programme et redémarre. Jamais pendant un enregistrement ou une transcription.
+
+**Verbatim est un projet amateur.** Une mise à jour apporte des nouveautés et
+des corrections, et peut aussi casser quelque chose qui marchait. Si ta
+version te convient, tu peux la garder.
 
 Seul `Verbatim.exe` change. Tes conversations (`Documents\Verbatim`), ta clé,
 ton agenda et tes réglages (`%LOCALAPPDATA%\Verbatim`) ne sont jamais touchés.
-L’ancienne version est gardée sous `Verbatim.old.exe` jusqu’au lancement
-suivant. Réglages → **Version** permet aussi d’installer depuis un fichier.
+Réglages → **Version** permet aussi d’installer depuis un fichier.
+
+### Revenir à la version précédente
+
+À chaque mise à jour, l’ancienne version reste à côté du programme sous le
+nom `Verbatim-precedent.exe`.
+
+- **Depuis Verbatim** : Réglages → **Version** → **Revenir à Verbatim x.y**.
+  Verbatim redémarre sur l’ancienne version et cesse d’annoncer celle que tu
+  viens de quitter.
+- **Si Verbatim ne démarre plus** : ouvre son dossier, supprime
+  `Verbatim.exe`, puis renomme `Verbatim-precedent.exe` en `Verbatim.exe`.
+- **Une version plus ancienne encore** : toutes les versions sont sur
+  github.com/Rnaock/verbatim/releases. Télécharge le zip voulu et remplace
+  `Verbatim.exe`.
+
+Dans tous les cas, tes conversations, ta clé et tes réglages restent en place.
+
+## Si Verbatim plante
+
+Quand Verbatim s’est arrêté brutalement (plantage, programme fermé de force,
+PC éteint), il le dit au lancement suivant et propose d’envoyer un rapport.
+**Envoyer par mail** ouvre ta messagerie avec le rapport déjà écrit : il
+reste à l’envoyer. Si rien ne s’ouvre, **Copier le rapport** et colle-le dans
+un message. Tu peux lire le rapport en entier avant : version, réglages
+audio, fin du journal. Il ne contient ni titre, ni nom, ni texte de
+conversation. Rien ne part sans ton clic.
 
 ## Accueil
 
@@ -274,6 +306,9 @@ du journal (que tu peux lire avant). **Ouvrir sur GitHub** ouvre une page
 pré-remplie sur le dépôt de Verbatim : colle la capture avec Ctrl+V, puis
 valide. **Proposer une idée** fonctionne pareil, sans capture.
 
+Sans compte GitHub, **Par mail** envoie le même texte en privé à l’auteur
+(sans la capture).
+
 C’est publié sur GitHub, **visible par tous** : ne colle pas une capture qui
 montre une conversation privée. Les captures restent aussi dans
 `%LOCALAPPDATA%\Verbatim\captures` (les 10 dernières).
@@ -295,7 +330,8 @@ suggestions (règle écrite dans `CLAUDE.md`).
 | Exposition de la clé | Elle reste dans la partie Rust de l’app. L’interface ne la reçoit jamais après sa saisie |
 | Réseau | Aucun port ouvert. Seule la partie Rust contacte ElevenLabs (api.elevenlabs.io) |
 | Interface | Politique CSP stricte : aucun site joignable, aucun accès direct au disque ni au shell |
-| Liens | Seules les pages d’elevenlabs.io et les liens de visio (Meet, Zoom, Teams) s’ouvrent, dans ton navigateur |
+| Liens | Seules les pages d’elevenlabs.io, les liens de visio (Meet, Zoom, Teams) et un mail vers l’adresse de l’auteur s’ouvrent, dans ton navigateur ou ta messagerie |
+| Rapports de plantage | Jamais envoyés automatiquement : un mail pré-rempli que tu relis et envoies toi-même |
 | Agenda | Adresse secrète chiffrée par DPAPI (`agenda.dpapi`), jamais montrée à l’interface. Lecture seule |
 | Mises à jour | Téléchargées uniquement depuis GitHub, empreinte SHA-256 vérifiée, et le fichier doit se présenter comme Verbatim avant d’être installé |
 | Audio | Reste sur ton disque. Il part chez ElevenLabs uniquement quand tu transcris |
