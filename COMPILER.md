@@ -47,3 +47,7 @@ Le banc e2e demande un build de développement (`cargo build`), Xvfb,
 `webkit2gtk-driver`, `tauri-driver` et Selenium. La variable
 `VERBATIM_API_BASE` (prise en compte en build de développement uniquement)
 redirige l’app vers la fausse API.
+
+## Icônes
+
+`python3 tests/make-icons.py` régénère `icons/` et `ui/icon-512.png` (Pillow).

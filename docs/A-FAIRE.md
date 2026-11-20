@@ -15,6 +15,11 @@ Liste des évolutions décidées, à reprendre à la prochaine mise à jour.
   silencieuse non envoyée à la transcription.
 - Faux « écart de -100 % » quand ElevenLabs débite après coup.
 
+## Fait en 4.4.1
+
+- Icône plus lisible : tuile bleue vive, barres blanches, trois barres sous
+  32 px (`tests/make-icons.py`).
+
 ## À étudier
 
 - Enregistrement oublié : proposer de couper aussi le fichier conservé (pour
