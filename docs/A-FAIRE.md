@@ -30,6 +30,14 @@ Liste des évolutions décidées, à reprendre à la prochaine mise à jour.
   proposé par mail pré-rempli, ou copie.
 - Signalement « Par mail » pour qui n'a pas de compte GitHub.
 
+## Fait en 4.5.1
+
+- Agenda : relu toutes les 2 minutes au plus (5 avant), au retour sur la
+  fenêtre si la copie a plus de 20 s, et sur « Actualiser ». L'heure de
+  lecture est affichée, un échec de lecture garde les rendez-vous connus.
+- Enregistrement « fantôme » : un relevé de niveaux arrivé après l'arrêt
+  remettait l'interface en mode enregistrement (plus de « Supprimer »).
+
 ## À étudier
 
 - Rapports de plantage : les plantages natifs (pilote audio, WebView2) ne

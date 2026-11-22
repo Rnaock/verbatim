@@ -311,3 +311,5 @@ textarea.inp{min-height:80px; resize:vertical; font-family:var(--mono); font-siz
 .howback{display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--slate); margin:10px 0 14px;}
 .howback b{color:var(--ink);}
 .howback code{font:12px var(--mono);}
+
+.today-sync{display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:12px; color:var(--slate); margin-top:4px;}

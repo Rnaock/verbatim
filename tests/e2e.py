@@ -62,6 +62,11 @@ PC_WORDS = words([("speaker_0", 3.2, 4.0, "Très bien,"), ("speaker_0", 4.1, 5.6
 FILE_WORDS = words([("speaker_0", 0.1, 1.0, "Note"), ("speaker_0", 1.1, 2.0, "vocale."), ("speaker_1", 2.2, 2.9, "Reçu.")])
 
 
+def dt_now():
+    import datetime as dt
+    return dt.datetime.now()
+
+
 def ics_feed():
     # Rendez-vous en cours (commencé il y a 5 min), heure de Paris.
     import datetime as dt
@@ -75,7 +80,14 @@ def ics_feed():
         "ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED;CN=Claire Martin:mailto:claire@example.org",
         "ATTENDEE;CUTYPE=INDIVIDUAL;PARTSTAT=ACCEPTED;CN=moi@example.org:mailto:moi@example.org",
         "X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij", "SUMMARY:Point budget avec Claire", "END:VEVENT",
-        "END:VCALENDAR", ""])
+    ] + ([
+        # Rendez-vous ajouté pendant que Verbatim est ouvert.
+        "BEGIN:VEVENT", "DTSTART;TZID=Europe/Paris:" + f(now + dt.timedelta(minutes=40)), "DTEND;TZID=Europe/Paris:" + f(now + dt.timedelta(minutes=50)),
+        "UID:ajout@google.com", "SUMMARY:Rendez-vous ajouté après coup", "END:VEVENT",
+    ] if EXTRA_EVENT else []) + ["END:VCALENDAR", ""])
+
+
+EXTRA_EVENT = []
 
 
 CAL_URL = "http://127.0.0.1:9914/calendar/ical/moi%40example.org/private-0123456789abcdef/basic.ics"
@@ -283,7 +295,7 @@ try:
     q(".top button[aria-label=Réglages]")[0].click()
     W().until(lambda _: q(".drawer"))
     vtxt = js("return document.querySelector('.drawer').textContent")
-    check("section Version avec installation depuis un fichier", "Verbatim 4.5.0" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
+    check("section Version avec installation depuis un fichier", "Verbatim 4.5.1" in vtxt and "Installer depuis un fichier" in vtxt, vtxt[-300:])
     check("explications au survol dans les réglages", len(q(".drawer .tip[data-tip]")) >= 2)
     check("vocabulaire : +20 % sur toute la transcription", "20 %" in js("return [...document.querySelectorAll('.drawer .tip')].map(t => t.dataset.tip).join(' ')"))
     r = inv("update_install_file", "{path:'/tmp/photo.png'}")
@@ -304,6 +316,19 @@ try:
     W().until(lambda _: q(".today .tev"))
     td = text(".today")
     check("accueil : agenda du jour avec repère « maintenant »", "Aujourd’hui" in td and "Point budget avec Claire" in td and q(".today .nowline") and q(".today .tev.live"), td)
+    # Un rendez-vous ajouté dans l'agenda apparaît sans relancer Verbatim.
+    if dt_now().hour < 23:
+        EXTRA_EVENT.append(1)
+        check("heure de lecture de l'agenda affichée", "Agenda lu à" in text(".today-sync"), text(".today-sync"))
+        next(b for b in q(".today-sync button") if b.text == "Actualiser").click()
+        W().until(lambda _: "Rendez-vous ajouté après coup" in text(".today"))
+        check("« Actualiser » relit l'agenda", True)
+        EXTRA_EVENT.clear()
+        js("window.dispatchEvent(new Event('focus'))")
+        time.sleep(1.0)
+        check("retour sur la fenêtre : copie récente gardée (pas de relecture à chaque clic)", "Rendez-vous ajouté après coup" in text(".today"))
+        next(b for b in q(".today-sync button") if b.text == "Actualiser").click()
+        W().until(lambda _: "Rendez-vous ajouté après coup" not in text(".today"))
     q(".top button[aria-label=Réglages]")[0].click()
     W().until(lambda _: q(".drawer"))
     next(b for b in q(".drawer .seg button") if b.text == "Sombre").click()
@@ -331,7 +356,7 @@ try:
     mt = text(".modal")
     ctx = js("const p=document.querySelector('.modal .ctx'); return p ? p.textContent : ''")
     check("signalement : capture absente hors Windows, sans blocage", "Pas de capture" in mt, mt[:300])
-    check("signalement : version et journal joints, sans titre de conversation", "Verbatim 4.5.0" in ctx and "Appel" not in ctx and "Claire" not in ctx, ctx[:400])
+    check("signalement : version et journal joints, sans titre de conversation", "Verbatim 4.5.1" in ctx and "Appel" not in ctx and "Claire" not in ctx, ctx[:400])
     check("avertissement « visible par tous »", "visible par tous" in mt)
     q(".modal input")[0].send_keys("Test")
     check("texte copiable une fois le titre saisi", next(b for b in q(".modal button") if b.text == "Copier le texte").is_enabled())
@@ -379,12 +404,18 @@ try:
     check("participant renommé pendant l'enregistrement : affiché aussitôt", any(e.text == "Claire D" for e in q(".evrow .pchip")), [e.text for e in q(".evrow .pchip")])
     time.sleep(6.5)
     shot("v4_recording.png")
+    rec_id = state()["recording"]["id"]
     next(b for b in q(".recbar button") if "Arrêter" in b.text).click()
     W().until(lambda _: not q(".recbar"))
+    # Un relevé de niveaux encore en route à l'arrêt ne relance pas l'affichage « en cours ».
+    js("window.__TAURI__.event.emit('rec-live', {id: arguments[0], live: {elapsed: 12, paused: false, tracks: []}, quiet: 0})", rec_id)
+    time.sleep(0.5)
+    check("relevé tardif ignoré après l'arrêt", state()["recording"] is None and not q(".recbar"), state()["recording"])
     W(60).until(lambda _: (item_by_title("Appel avec Claire") or {}).get("has_transcript"))
+    check("suppression proposée après l'arrêt", any(b.text == "Supprimer" for b in q(".page .sub button")), [b.text for b in q(".page .sub button")])
     it = item_by_title("Appel avec Claire")
     folder = os.path.join(LIB, it["id"])
-    check("durée hors pause ≈ 11 s", 10.0 < it["duration"] < 12.5, it["duration"])
+    check("durée hors pause ≈ 11 s", 10.0 < it["duration"] < 13.5, it["duration"])
     files = os.listdir(folder)
     check("pistes et écoute en FLAC", all(f in files for f in ["micro.flac", "pc.flac", "ecoute.flac", "envelope.json", "transcription.txt"]), files)
     check("fichiers de travail supprimés", not any(f.endswith(".wav") for f in files), files)

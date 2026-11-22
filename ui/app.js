@@ -137,7 +137,11 @@ async function startRecording(title, event) {
     set({ recording: { id }, selected: id, live: null });
   } catch (e) { toast('Enregistrement impossible : ' + errMsg(e)); }
 }
+// Enregistrements terminés : un relevé de niveaux encore en route au moment de
+// l'arrêt ne doit pas faire croire que l'enregistrement continue.
+const endedRecordings = new Set();
 async function stopRecording() {
+  if (S.recording) endedRecordings.add(S.recording.id);
   try { await invoke('rec_stop'); } catch (e) { toast(errMsg(e)); }
   set({ recording: null, live: null });
 }
@@ -155,8 +159,9 @@ function applyTheme(t) {
   if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
   else delete document.documentElement.dataset.theme;
 }
-async function refreshCalendar(force) {
-  try { set({ cal: await invoke('calendar_now', { force: !!force }) }); } catch (_) {}
+// maxAge (secondes) : âge accepté pour la copie de l'agenda gardée par Verbatim.
+async function refreshCalendar(force, maxAge) {
+  try { set({ cal: await invoke('calendar_now', { force: !!force, maxAge: maxAge || null }) }); } catch (_) {}
 }
 const fmtRange = e => `${hhmm(new Date(e.start * 1000))}–${hhmm(new Date(e.end * 1000))}`;
 const whenLabel = e => { const m = Math.round((e.start * 1000 - Date.now()) / 60000); return m > 0 ? `dans ${m} min` : 'en cours'; };
@@ -683,6 +688,7 @@ function TodayAgenda() {
   const items = useStore(s => s.items);
   const recording = useStore(s => s.recording);
   const [, tick] = useState(0);
+  const [busy, setBusy] = useState(false);
   useEffect(() => { const t = setInterval(() => tick(x => x + 1), 30_000); return () => clearInterval(t); }, []);
   const day = new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
   if (!cal.connected) return html`<aside class="today"><div class="today-h"><b>Aujourd’hui</b><span class="muted">${day}</span></div>
@@ -714,7 +720,10 @@ function TodayAgenda() {
     </div>`);
   }
   if (!marked) rows.push(marker);
+  const reload = async () => { setBusy(true); await refreshCalendar(true); setBusy(false); };
   return html`<aside class="today"><div class="today-h"><b>Aujourd’hui</b><span class="muted">${day}</span></div>
+    <div class="today-sync"><span>${cal.read_at ? `Agenda lu à ${hhmm(new Date(cal.read_at * 1000))}` : ''}</span>
+      <button class="linkbtn quiet" disabled=${busy} onClick=${reload}>${busy ? 'Lecture…' : 'Actualiser'}</button></div>
     ${cal.error ? html`<${Note} kind="warn">Agenda non mis à jour : ${cal.error}<//>` : null}
     ${cal.today.length ? html`<div class="tlist">${rows}</div>` : html`<p class="muted" style="margin-top:8px">Aucun rendez-vous aujourd’hui.</p>`}
   </aside>`;
@@ -1450,8 +1459,12 @@ async function boot() {
     listen('item-removed', id => set(s => { const items = { ...s.items }; delete items[id]; return { items, selected: s.selected === id ? null : s.selected }; })),
     listen('job', ({ id, job }) => { set(s => s.items[id] ? { items: { ...s.items, [id]: { ...s.items[id], job } } } : {}); if (!job || job.state === 'error') setTimeout(fetchBalance, 2500); }),
     listen('progress', p => set(s => ({ progress: { ...s.progress, [p.id]: p } }))),
-    listen('rec-live', ({ id, live, quiet }) => set(s => ({ live: { ...live, quiet: quiet || 0 }, recording: s.recording && s.recording.id === id ? s.recording : { id } }))),
-    listen('rec-error', ({ message }) => { toast('Enregistrement arrêté : ' + message); set({ recording: null, live: null }); }),
+    listen('rec-live', ({ id, live, quiet }) => {
+      const it = S.items[id];
+      if (endedRecordings.has(id) || (it && it.state !== 'recording')) return;
+      set(s => ({ live: { ...live, quiet: quiet || 0 }, recording: s.recording && s.recording.id === id ? s.recording : { id } }));
+    }),
+    listen('rec-error', ({ message }) => { if (S.recording) endedRecordings.add(S.recording.id); toast('Enregistrement arrêté : ' + message); set({ recording: null, live: null }); }),
     listen('library-reset', () => loadLibrary()),
     listen('settings-changed', () => refreshState()),
     listen('update-available', u => set({ update: u })),
@@ -1464,8 +1477,8 @@ async function boot() {
   } catch (e) { set({ failed: errMsg(e) }); return; }
   // Agenda : au lancement, chaque minute, et quand on revient sur la fenêtre.
   refreshCalendar();
-  setInterval(refreshCalendar, 60_000);
-  window.addEventListener('focus', () => refreshCalendar());
+  setInterval(() => refreshCalendar(), 60_000);
+  window.addEventListener('focus', () => refreshCalendar(false, 20));
   try {
     T.webview.getCurrentWebview().onDragDropEvent(ev => {
       const p = ev.payload || {};

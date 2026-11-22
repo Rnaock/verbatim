@@ -144,7 +144,10 @@ pub struct App {
     /// Adresse iCal secrète (déchiffrée en mémoire seulement).
     cal_url: Mutex<Option<String>>,
     /// Agenda lu : instant de lecture et événements.
-    cal_cache: Mutex<Option<(std::time::Instant, Arc<Vec<calendar::VEvent>>)>>,
+    /// Dernière lecture réussie de l'agenda : instant, heure (Unix) et événements.
+    cal_cache: Mutex<Option<(std::time::Instant, i64, Arc<Vec<calendar::VEvent>>)>>,
+    /// La dernière lecture a échoué (pour ne consigner que le changement d'état).
+    cal_failing: AtomicBool,
 }
 
 /// Compte une opération longue tant qu'elle vit.
@@ -439,6 +442,9 @@ fn rec_start(app: AppHandle, st: St<'_>, mic: bool, pc: bool, title: Option<Stri
                     let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
                 }
             }
+            if ticker_stop.load(Ordering::SeqCst) {
+                break;
+            }
             let _ = app.emit("rec-live", json!({ "id": id, "live": live, "quiet": quiet }));
             n += 1;
             let mut changed = false;
@@ -699,34 +705,51 @@ async fn pick_files(app: AppHandle) -> Res<Vec<String>> {
 // ---------------------------------------------------------------------------
 // Agenda
 // ---------------------------------------------------------------------------
-const CAL_REFRESH: Duration = Duration::from_secs(5 * 60);
+/// Âge au-delà duquel l'agenda est relu (l'interface demande une lecture par
+/// minute, et une copie plus fraîche encore au retour sur la fenêtre).
+const CAL_REFRESH: Duration = Duration::from_secs(2 * 60);
 
 #[tauri::command]
 fn calendar_state(st: St<'_>) -> calendar::CalState {
     calendar::state(st.cal_url.lock().unwrap().as_deref())
 }
 
-/// Lit l'agenda si la copie a plus de 5 minutes (ou sur demande).
-async fn calendar_events(st: &App, force: bool) -> Res<Arc<Vec<calendar::VEvent>>> {
+struct CalRead {
+    events: Arc<Vec<calendar::VEvent>>,
+    /// Heure (Unix) de la lecture dont viennent ces événements.
+    read_at: i64,
+    /// La relecture vient d'échouer : les événements datent de `read_at`.
+    stale: Option<String>,
+}
+
+/// Lit l'agenda si la copie est plus vieille que `max_age`. Si la lecture
+/// échoue, la dernière copie reste utilisable et l'échec est signalé.
+async fn calendar_events(st: &App, max_age: Duration) -> Res<CalRead> {
     let url = st.cal_url.lock().unwrap().clone().ok_or(ApiError::new(404, "aucun agenda connecté"))?;
-    if !force {
-        if let Some((at, ev)) = st.cal_cache.lock().unwrap().as_ref() {
-            if at.elapsed() < CAL_REFRESH {
-                return Ok(ev.clone());
-            }
+    if let Some((at, read_at, ev)) = st.cal_cache.lock().unwrap().as_ref() {
+        if at.elapsed() < max_age {
+            return Ok(CalRead { events: ev.clone(), read_at: *read_at, stale: None });
         }
     }
     match calendar::fetch(&st.http, &url).await {
         Ok(text) => {
             let ev = Arc::new(calendar::parse(&text));
-            *st.cal_cache.lock().unwrap() = Some((std::time::Instant::now(), ev.clone()));
-            Ok(ev)
+            let read_at = chrono::Utc::now().timestamp();
+            *st.cal_cache.lock().unwrap() = Some((std::time::Instant::now(), read_at, ev.clone()));
+            if st.cal_failing.swap(false, Ordering::SeqCst) {
+                trace("agenda : lecture rétablie");
+            }
+            Ok(CalRead { events: ev, read_at, stale: None })
         }
-        // Hors ligne : la dernière lecture reste utilisable.
-        Err(e) => match st.cal_cache.lock().unwrap().as_ref() {
-            Some((_, ev)) if !force => Ok(ev.clone()),
-            _ => Err(e),
-        },
+        Err(e) => {
+            if !st.cal_failing.swap(true, Ordering::SeqCst) {
+                trace(&format!("agenda : lecture impossible ({})", e.status));
+            }
+            match st.cal_cache.lock().unwrap().as_ref() {
+                Some((_, read_at, ev)) => Ok(CalRead { events: ev.clone(), read_at: *read_at, stale: Some(e.message) }),
+                None => Err(e),
+            }
+        }
     }
 }
 
@@ -759,7 +782,7 @@ async fn calendar_set(st: St<'_>, url: Option<String>) -> Res<calendar::CalState
             let text = calendar::fetch(&st.http, &u).await?;
             calendar::save_url(&st.paths, Some(&u))?;
             *st.cal_url.lock().unwrap() = Some(u);
-            *st.cal_cache.lock().unwrap() = Some((std::time::Instant::now(), Arc::new(calendar::parse(&text))));
+            *st.cal_cache.lock().unwrap() = Some((std::time::Instant::now(), chrono::Utc::now().timestamp(), Arc::new(calendar::parse(&text))));
             trace("agenda connecté");
         }
     }
@@ -775,21 +798,22 @@ struct CalNow {
     next: Option<calendar::CalEvent>,
     /// Toute la journée (accueil).
     today: Vec<calendar::CalEvent>,
+    /// Heure (Unix) de la lecture de l'agenda dont viennent ces rendez-vous.
+    read_at: Option<i64>,
     error: Option<String>,
 }
 
 #[tauri::command]
-async fn calendar_now(st: St<'_>, force: Option<bool>) -> Res<CalNow> {
+async fn calendar_now(st: St<'_>, force: Option<bool>, max_age: Option<u64>) -> Res<CalNow> {
     if st.cal_url.lock().unwrap().is_none() {
-        return Ok(CalNow { connected: false, now: vec![], next: None, today: vec![], error: None });
+        return Ok(CalNow { connected: false, now: vec![], next: None, today: vec![], read_at: None, error: None });
     }
-    let ev = match calendar_events(&st, force.unwrap_or(false)).await {
-        Ok(ev) => ev,
-        Err(e) => {
-            trace(&format!("agenda : lecture impossible ({})", e.status));
-            return Ok(CalNow { connected: true, now: vec![], next: None, today: vec![], error: Some(e.message) });
-        }
+    let max_age = if force.unwrap_or(false) { Duration::ZERO } else { max_age.map(Duration::from_secs).unwrap_or(CAL_REFRESH).min(CAL_REFRESH) };
+    let read = match calendar_events(&st, max_age).await {
+        Ok(r) => r,
+        Err(e) => return Ok(CalNow { connected: true, now: vec![], next: None, today: vec![], read_at: None, error: Some(e.message) }),
     };
+    let (ev, read_at, stale) = (read.events, read.read_at, read.stale);
     let now = chrono::Utc::now();
     let end_of_day = chrono::Local::now().date_naive().and_hms_opt(23, 59, 59).and_then(|d| d.and_local_timezone(chrono::Local).earliest()).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or(now + chrono::Duration::hours(12));
     let people = st.settings().people;
@@ -797,13 +821,13 @@ async fn calendar_now(st: St<'_>, force: Option<bool>) -> Res<CalNow> {
     let today = with_my_name(calendar::events_between(&ev, start_of_day, end_of_day.max(now + chrono::Duration::hours(1)), me_of(&st).as_deref(), &people), &st.settings().my_name);
     let current = calendar::current(&today, now);
     let next = today.iter().find(|e| e.start > now.timestamp() + calendar::LEAD_MIN * 60).cloned();
-    Ok(CalNow { connected: true, now: current, next, today, error: None })
+    Ok(CalNow { connected: true, now: current, next, today, read_at: Some(read_at), error: stale })
 }
 
 /// Rendez-vous proches d'un instant (pour lier une conversation après coup).
 #[tauri::command]
 async fn calendar_around(st: St<'_>, ts: i64) -> Res<Vec<calendar::CalEvent>> {
-    let ev = calendar_events(&st, false).await?;
+    let ev = calendar_events(&st, CAL_REFRESH).await?.events;
     let at = chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(chrono::Utc::now);
     let people = st.settings().people;
     Ok(with_my_name(calendar::events_between(&ev, at - chrono::Duration::hours(2), at + chrono::Duration::hours(2), me_of(&st).as_deref(), &people), &st.settings().my_name))
@@ -816,7 +840,7 @@ fn pick_event(st: &App, wanted: Option<&str>) -> Option<calendar::CalEvent> {
     if wanted == Some("") || st.cal_url.lock().unwrap().is_none() {
         return None;
     }
-    let ev = st.cal_cache.lock().unwrap().as_ref().map(|(_, e)| e.clone())?;
+    let ev = st.cal_cache.lock().unwrap().as_ref().map(|(_, _, e)| e.clone())?;
     let now = chrono::Utc::now();
     let people = st.settings().people;
     let list = with_my_name(calendar::events_between(&ev, now - chrono::Duration::hours(3), now + chrono::Duration::hours(3), me_of(st).as_deref(), &people), &st.settings().my_name);
@@ -1765,6 +1789,7 @@ pub fn run() {
         crash: Mutex::new(None),
         cal_url: Mutex::new(cal_url),
         cal_cache: Mutex::new(None),
+        cal_failing: AtomicBool::new(false),
     });
 
     tauri::Builder::default()
