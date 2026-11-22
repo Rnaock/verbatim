@@ -1,6 +1,6 @@
 {
- "version": "4.5.0",
- "sha256": "d4ba9826f56d1b4e1b110c757fcfc2bc12ee3f507f9a1710846e270d7ae1ca91",
- "size": 10205184,
- "notes": "Les mises à jour passent maintenant par une fenêtre qui présente les nouveautés et te laisse ignorer une version. L’ancienne version est gardée : Réglages → Version permet d’y revenir en un clic. Si Verbatim s’arrête brutalement, il propose au lancement suivant d’envoyer un rapport technique par mail (rien ne part sans ton clic)."
+ "version": "4.5.1",
+ "sha256": "d5452608fa143d51b76ff57c14584bc3182da5dce34860aebc43c9ca987c124d",
+ "size": 10206208,
+ "notes": "L’agenda se met à jour plus vite (toutes les 2 minutes, au retour sur la fenêtre, et avec le bouton « Actualiser » de l’accueil). Correction : après l’arrêt d’un enregistrement, le bouton « Supprimer » pouvait disparaître."
 }
