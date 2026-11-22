@@ -63,6 +63,7 @@ let S = {
   progress: {}, balance: null, balanceError: null, devices: null, drawer: false, toast: null, dragging: false,
   updates: false, update: null, updating: null, updateFile: null, report: null, quick: false,
   updateDialog: false, updateManual: false, contact: null, rollback: null, crash: null,
+  ctx: null, focusTitle: null,
   cal: { connected: false, now: [], next: null, error: null }, calState: null,
 };
 const subs = new Set();
@@ -199,6 +200,7 @@ const I = {
   folder: html`<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 3.5h4.5l1.5 1.5h7v8.5h-13z"/></svg>`,
   more: html`<svg class="icon" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>`,
   cal: html`<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/></svg>`,
+  refresh: html`<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 6.5A5.6 5.6 0 0 0 3.2 5.2L2.5 6.5"/><path d="M2.5 3v3.5H6"/><path d="M2.5 9.5a5.6 5.6 0 0 0 10.3 1.3l.7-1.3"/><path d="M13.5 13V9.5H10"/></svg>`,
   swap: html`<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h9l-2.5-2.5M13 11H4l2.5 2.5"/></svg>`,
 };
 const srcIcon = src => src === 'mic' ? I.mic : src === 'pc' ? I.pc : null;
@@ -209,6 +211,40 @@ const srcIcon = src => src === 'mic' ? I.mic : src === 'pc' ? I.pc : null;
 function Popover({ open, onClose, children, style }) {
   if (!open) return null;
   return html`<div class="backdrop" onClick=${onClose}></div><div class="pop" style=${style} onClick=${e => e.stopPropagation()}>${children}</div>`;
+}
+// Menu du clic droit : une liste d'actions à l'endroit du clic. Une action
+// « confirm » demande un second clic avant de s'exécuter.
+function openMenu(e, items) {
+  e.preventDefault(); e.stopPropagation();
+  set({ ctx: { x: e.clientX, y: e.clientY, items: items.filter(Boolean) } });
+}
+function ContextMenu() {
+  const ctx = useStore(s => s.ctx);
+  const [armed, setArmed] = useState(null);
+  const ref = useRef();
+  useEffect(() => { setArmed(null); }, [ctx]);
+  // Le menu reste dans la fenêtre, même ouvert près d'un bord.
+  useEffect(() => {
+    const el = ref.current; if (!el || !ctx) return;
+    const r = el.getBoundingClientRect();
+    el.style.left = Math.max(6, Math.min(ctx.x, window.innerWidth - r.width - 6)) + 'px';
+    el.style.top = Math.max(6, Math.min(ctx.y, window.innerHeight - r.height - 6)) + 'px';
+  }, [ctx, armed]);
+  useEffect(() => {
+    if (!ctx) return;
+    const k = e => { if (e.key === 'Escape') set({ ctx: null }); };
+    window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k);
+  }, [ctx]);
+  if (!ctx) return null;
+  const close = () => set({ ctx: null });
+  return html`<div class="backdrop" style="z-index:59" onClick=${close} onContextMenu=${e => { e.preventDefault(); close(); }}></div>
+  <div class="pop ctxmenu" role="menu" ref=${ref} style=${`position:fixed; left:${ctx.x}px; top:${ctx.y}px`}>
+    ${ctx.items.map((it, i) => it.sep ? html`<div class="sep"></div>`
+      : html`<button class=${'item' + (it.danger ? ' danger' : '')} role="menuitem" disabled=${!!it.disabled} onClick=${() => {
+          if (it.confirm && armed !== i) { setArmed(i); return; }
+          close(); it.run();
+        }}>${it.confirm && armed === i ? it.confirm : it.label}</button>`)}
+  </div>`;
 }
 function Note({ kind, children }) { return html`<div class=${'note ' + (kind || '')}>${children}</div>`; }
 // Explication au survol (et au focus clavier), pour garder les panneaux légers.
@@ -222,6 +258,8 @@ function TitleField({ id, title, autoFocus }) {
   const ref = useRef();
   useEffect(() => { if (!focused.current) setV(title); }, [title]);
   useEffect(() => { if (autoFocus && ref.current && document.activeElement !== ref.current) { ref.current.focus(); ref.current.select(); } }, [id, autoFocus]);
+  // « Renommer » du clic droit : la demande est consommée une fois le titre sélectionné.
+  useEffect(() => { if (S.focusTitle === id && ref.current) set({ focusTitle: null }); }, [id, autoFocus]);
   const save = () => {
     focused.current = false;
     const t = v.trim();
@@ -256,7 +294,7 @@ function RecordButton() {
   const toggle = k => saveSettings({ [k]: !settings[k] });
   const srcs = [settings.rec_mic && 'micro', settings.rec_pc && 'son du PC'].filter(Boolean).join(' + ') || 'aucune source';
   return html`<div class="split" style="position:relative">
-    <button class="btn rec" onClick=${() => startRecording()} title=${'Enregistrer : ' + srcs}><span class="dot"></span> Enregistrer</button>
+    <button class="btn rec" onClick=${() => startRecording()} title=${'Sources : ' + srcs}><span class="dot"></span> Enregistrer</button>
     <button class="btn rec" aria-label="Sources" onClick=${() => setOpen(true)}>${I.chev}</button>
     <${Popover} open=${open} onClose=${() => setOpen(false)} style="top:40px; left:0; width:300px">
       <div class="head">Sources</div>
@@ -431,7 +469,7 @@ function Meter({ t, elapsed, recId }) {
   return html`<div class=${'meter' + (warn ? ' warn' : '')}>
     <span class="lbl row" style=${'color:' + color}>${t.role === 'mic' ? I.mic : I.pc} ${t.role === 'mic' ? 'Micro' : 'Son du PC'}</span>
     <div class="bar"><i style=${`width:${pct}%; background:${pct > 92 ? 'var(--rec)' : color}`}></i></div>
-    <span class="dev" title=${dev}>${dev}</span>
+    <span class="dev" onMouseEnter=${e => { const el = e.currentTarget; el.title = el.scrollWidth > el.clientWidth ? dev : ''; }}>${dev}</span>
   </div>`;
 }
 
@@ -462,6 +500,18 @@ function RecBar() {
 /* ------------------------------------------------------------------ */
 /* Bibliothèque                                                        */
 /* ------------------------------------------------------------------ */
+// Clic droit sur une conversation de la liste.
+function entryMenu(it) {
+  const busy = it.state === 'recording' || it.state === 'finalizing' || it.state === 'importing' || !!(it.job && it.job.state !== 'error');
+  return [
+    { label: 'Ouvrir', run: () => set({ selected: it.id }) },
+    { label: 'Renommer', run: () => set({ selected: it.id, focusTitle: it.id }) },
+    { label: 'Ouvrir le dossier', run: () => invoke('open_folder', { id: it.id }).catch(e => toast(errMsg(e))) },
+    { sep: true },
+    { label: 'Supprimer', confirm: 'Confirmer : mettre à la corbeille', danger: true, disabled: busy,
+      run: () => invoke('item_trash', { id: it.id }).catch(e => toast(errMsg(e))) },
+  ];
+}
 function Side() {
   const items = useStore(s => s.items);
   const hits = useStore(s => s.hits);
@@ -479,7 +529,7 @@ function Side() {
   if (!groups.length) return html`<aside class="side"><div class="empty-list">${hits ? 'Aucune conversation ne correspond.' : 'Tes conversations apparaîtront ici.'}</div></aside>`;
   return html`<aside class="side">${groups.map(g => html`
     <div class="group">${g.label}</div>
-    ${g.items.map(({ it, d }) => html`<button class=${'entry' + (it.id === selected ? ' sel' : '')} onClick=${() => set({ selected: it.id })}>
+    ${g.items.map(({ it, d }) => html`<button class=${'entry' + (it.id === selected ? ' sel' : '')} onClick=${() => set({ selected: it.id })} onContextMenu=${e => openMenu(e, entryMenu(it))}>
       <div class="t">${it.title}</div>
       <div class="m">
         ${it.kind === 'recording' ? I.mic : I.file}
@@ -723,7 +773,7 @@ function TodayAgenda() {
   const reload = async () => { setBusy(true); await refreshCalendar(true); setBusy(false); };
   return html`<aside class="today"><div class="today-h"><b>Aujourd’hui</b><span class="muted">${day}</span></div>
     <div class="today-sync"><span>${cal.read_at ? `Agenda lu à ${hhmm(new Date(cal.read_at * 1000))}` : ''}</span>
-      <button class="linkbtn quiet" disabled=${busy} onClick=${reload}>${busy ? 'Lecture…' : 'Actualiser'}</button></div>
+      <button class=${'iconbtn' + (busy ? ' spin' : '')} aria-label="Actualiser l’agenda" title="Actualiser l’agenda" disabled=${busy} onClick=${reload}>${I.refresh}</button></div>
     ${cal.error ? html`<${Note} kind="warn">Agenda non mis à jour : ${cal.error}<//>` : null}
     ${cal.today.length ? html`<div class="tlist">${rows}</div>` : html`<p class="muted" style="margin-top:8px">Aucun rendez-vous aujourd’hui.</p>`}
   </aside>`;
@@ -884,7 +934,9 @@ function SpeakerChip({ sp, color, pct, transcript, onEdit, people }) {
 
 function Paragraph({ seg, transcript, colorOf, onEdit, onSeek }) {
   const [open, setOpen] = useState(false);
-  return html`<p class="para">
+  // Clic droit : les mêmes actions. Avec du texte sélectionné, le menu du système reste (Copier).
+  const menu = e => { if (String(window.getSelection())) return; e.preventDefault(); e.stopPropagation(); setOpen(true); };
+  return html`<p class="para" onContextMenu=${menu}>
     <button class="reassign" title="Changer de locuteur" onClick=${() => setOpen(true)}>${I.swap}</button>
     ${seg.text}
     <${Popover} open=${open} onClose=${() => setOpen(false)} style="top:22px; left:-30px">
@@ -895,6 +947,7 @@ function Paragraph({ seg, transcript, colorOf, onEdit, onSeek }) {
       <button class="item" onClick=${() => { setOpen(false); onEdit({ type: 'assign-rest', seg: seg.id }); }}>Réattribuer ce paragraphe et la suite du tour</button>
       <div class="sep"></div>
       <button class="item" onClick=${() => { setOpen(false); onSeek(seg.start); }}>Écouter ce passage</button>
+      <button class="item" onClick=${() => { setOpen(false); navigator.clipboard.writeText(seg.text).then(() => toast('Passage copié.')); }}>Copier ce passage</button>
     <//>
   </p>`;
 }
@@ -1123,6 +1176,7 @@ function Detail({ id }) {
   const prog = useStore(s => s.progress[id]);
   const recording = useStore(s => s.recording && s.recording.id === id);
   const live = useStore(s => s.recording && s.recording.id === id ? s.live : null);
+  const focusTitle = useStore(s => s.focusTitle === id);
   const [detail, setDetail] = useState(null);
   const [loadErr, setLoadErr] = useState(null);
   const [time, setTime] = useState(null);
@@ -1149,7 +1203,7 @@ function Detail({ id }) {
   const nameNow = it.state === 'finalizing' && /^Enregistrement( \(\d+\))?$/.test(sum.title);
   return html`<div class="page">
     <button class="back" onClick=${() => set({ selected: null })}>‹ Accueil</button>
-    <div class="head"><${TitleField} id=${id} title=${sum.title} autoFocus=${nameNow} /></div>
+    <div class="head"><${TitleField} id=${id} title=${sum.title} autoFocus=${nameNow || focusTitle} /></div>
     ${nameNow ? html`<small class="muted" style="display:block;margin:-4px 0 8px">Donne-lui un nom pendant la finalisation : tape simplement, puis Entrée.</small>` : null}
     <div class="sub">
       <span>${created.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })} · ${hhmm(created)}</span>
@@ -1401,6 +1455,7 @@ function App() {
   if (failed) return html`<div class="page"><${Note} kind="err">Verbatim n’a pas pu démarrer : ${failed}<//></div>`;
   if (!ready) return null;
   return html`<div class=${'shell' + (dragging ? ' dragging' : '')}>
+    <${ContextMenu} />
     <${ReportModal} />
     <${UpdateDialog} />
     ${onboarding ? null : html`<${CrashModal} />`}
@@ -1491,6 +1546,13 @@ async function boot() {
 
 window.__errs = []; window.addEventListener('error', e => window.__errs.push(String(e.message))); window.addEventListener('unhandledrejection', e => window.__errs.push(String(e.reason && e.reason.message || e.reason)));
 // Accès pour les tests automatisés.
+// Le menu du navigateur (Retour, Actualiser, Imprimer…) n'a pas de sens ici.
+// Il reste dans les champs de saisie et sur du texte sélectionné, pour copier et coller.
+document.addEventListener('contextmenu', e => {
+  const t = e.target;
+  if ((t.closest && t.closest('input, textarea, [contenteditable]')) || String(window.getSelection())) return;
+  e.preventDefault();
+});
 window.Verbatim = Object.freeze({ importPaths, state: () => S, select: id => set({ selected: id }) });
 render(html`<${App} />`, document.getElementById('app'));
 boot();

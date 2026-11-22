@@ -38,6 +38,15 @@ Liste des évolutions décidées, à reprendre à la prochaine mise à jour.
 - Enregistrement « fantôme » : un relevé de niveaux arrivé après l'arrêt
   remettait l'interface en mode enregistrement (plus de « Supprimer »).
 
+## Fait en 4.5.2
+
+- Clic droit : le menu du navigateur (Retour, Actualiser, Imprimer) est
+  retiré, sauf dans les champs de saisie et sur du texte sélectionné. Clic
+  droit sur une conversation de la liste (ouvrir, renommer, dossier,
+  supprimer) et sur un paragraphe (mêmes actions que ⇄, plus copier).
+- Agenda : bouton d'actualisation en icône.
+- Bulles au survol qui répétaient le texte affiché retirées.
+
 ## À étudier
 
 - Rapports de plantage : les plantages natifs (pilote audio, WebView2) ne

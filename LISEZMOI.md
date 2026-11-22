@@ -265,6 +265,10 @@ sont alors à refaire).
 
 ## La bibliothèque
 
+**Clic droit** sur une conversation de la liste : ouvrir, renommer, ouvrir
+le dossier, supprimer. Sur un paragraphe de transcription : changer de
+locuteur, écouter ou copier le passage.
+
 Par défaut `Documents\Verbatim` (modifiable dans **Réglages**). Un dossier par
 conversation, lisible sans Verbatim :
 

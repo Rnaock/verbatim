@@ -313,3 +313,13 @@ textarea.inp{min-height:80px; resize:vertical; font-family:var(--mono); font-siz
 .howback code{font:12px var(--mono);}
 
 .today-sync{display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:12px; color:var(--slate); margin-top:4px;}
+
+/* Clic droit et bouton d'actualisation */
+.ctxmenu{min-width:200px; z-index:60;}
+.pop .item.danger{color:var(--rec);}
+.pop .item:disabled{opacity:.45; cursor:default; background:none;}
+.iconbtn{border:none; background:none; padding:3px; border-radius:6px; cursor:pointer; color:var(--slate); display:inline-flex;}
+.iconbtn:hover{background:var(--sunk); color:var(--ink);}
+.iconbtn:disabled{cursor:default;}
+.iconbtn.spin svg{animation:spin .9s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
