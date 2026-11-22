@@ -1,6 +1,6 @@
 {
- "version": "4.5.1",
- "sha256": "d5452608fa143d51b76ff57c14584bc3182da5dce34860aebc43c9ca987c124d",
- "size": 10206208,
- "notes": "L’agenda se met à jour plus vite (toutes les 2 minutes, au retour sur la fenêtre, et avec le bouton « Actualiser » de l’accueil). Correction : après l’arrêt d’un enregistrement, le bouton « Supprimer » pouvait disparaître."
+ "version": "4.5.2",
+ "sha256": "92a3e4216548fced65ea79ead3698cce40f55808a3caf5f6c5d99c1b243242d2",
+ "size": 10207744,
+ "notes": "Clic droit sur une conversation de la liste (ouvrir, renommer, dossier, supprimer) et sur un paragraphe (locuteur, écouter, copier). Le menu « Retour, Actualiser, Imprimer » n’apparaît plus. Agenda : bouton d’actualisation en icône, relecture plus fréquente. Correction : « Supprimer » pouvait disparaître après l’arrêt d’un enregistrement."
 }
